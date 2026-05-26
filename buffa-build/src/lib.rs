@@ -35,6 +35,8 @@ use buffa_codegen::generated::descriptor::FileDescriptorSet;
 #[doc(inline)]
 pub use buffa_codegen::CodeGenConfig;
 #[doc(inline)]
+pub use buffa_codegen::ReflectMode;
+#[doc(inline)]
 pub use buffa_codegen::StringRepr;
 
 /// How to produce a `FileDescriptorSet` from `.proto` files.
@@ -271,13 +273,18 @@ impl Config {
         self
     }
 
-    /// Generate `impl Reflectable` for owned message types (default: false).
+    /// Enable reflection on generated types (default: off).
     ///
-    /// When enabled, each generated message gets a bridge-mode reflection
-    /// impl: `foo.reflect()` returns a [`ReflectCow`] wrapping a
-    /// [`DynamicMessage`] decoded from `foo`'s wire encoding, against a
-    /// lazily-built [`DescriptorPool`] embedded as `FileDescriptorSet`
-    /// bytes. The pool is reachable as `your_crate::your_pkg::descriptor_pool()`.
+    /// `generate_reflection(true)` selects [`ReflectMode::VTable`] — the fast
+    /// path: `foo.reflect()` borrows `foo` directly (no encode/decode
+    /// round-trip), and owned and view types implement `ReflectMessage`. For
+    /// the smaller bridge implementation (`reflect()` round-trips through a
+    /// [`DynamicMessage`]), use [`reflect_mode(ReflectMode::Bridge)`](Self::reflect_mode)
+    /// instead. `generate_reflection(false)` is [`ReflectMode::Off`].
+    ///
+    /// Either mode embeds a lazily-built [`DescriptorPool`] (as
+    /// `FileDescriptorSet` bytes) reachable as
+    /// `your_crate::your_pkg::descriptor_pool()`.
     ///
     /// # Cargo.toml setup
     ///
@@ -308,10 +315,10 @@ impl Config {
     ///
     /// # Performance
     ///
-    /// `reflect()` is one full encode/decode round-trip plus a heap
-    /// allocation. For repeated reflective access, hold onto the returned
-    /// handle rather than calling `reflect()` per field. The first call
-    /// also pays a one-time pool build cost.
+    /// In the default vtable mode, `reflect()` borrows `self` — no round-trip,
+    /// no allocation; reflective accessors read fields in place. (Bridge mode
+    /// instead pays one encode/decode round-trip plus a heap allocation per
+    /// call.) Either way the first call pays a one-time pool build cost.
     ///
     /// # Build time and binary size
     ///
@@ -320,34 +327,42 @@ impl Config {
     /// crate this is one copy. For a multi-package codegen run the bytes
     /// duplicate per package — measurable for large proto trees. The
     /// serialization happens once per `compile()` call (not per package),
-    /// so build-time CPU does not scale with package count.
+    /// so build-time CPU does not scale with package count. Vtable mode also
+    /// emits an `impl ReflectMessage` per type, so it produces more code than
+    /// bridge mode.
     ///
     /// [`ReflectCow`]: https://docs.rs/buffa-descriptor/latest/buffa_descriptor/reflect/enum.ReflectCow.html
     /// [`DynamicMessage`]: https://docs.rs/buffa-descriptor/latest/buffa_descriptor/reflect/struct.DynamicMessage.html
     /// [`DescriptorPool`]: https://docs.rs/buffa-descriptor/latest/buffa_descriptor/struct.DescriptorPool.html
     #[must_use]
     pub fn generate_reflection(mut self, enabled: bool) -> Self {
-        self.codegen_config.generate_reflection = enabled;
+        // The simple on/off knob selects the fast vtable path; Bridge is opt-in
+        // via `reflect_mode`.
+        let mode = if enabled {
+            ReflectMode::VTable
+        } else {
+            ReflectMode::Off
+        };
+        mode.apply(&mut self.codegen_config);
         self
     }
 
-    /// Additionally emit vtable-mode reflection (`impl ReflectMessage` on view
-    /// types) on top of the bridge-mode `Reflectable` impl.
+    /// Select the reflection mode (the fuller form of
+    /// [`generate_reflection`](Self::generate_reflection)).
     ///
-    /// Requires [`generate_reflection`](Self::generate_reflection) and view
-    /// generation (both must be enabled — [`compile`](Self::compile) errors
-    /// otherwise). Vtable mode reads view struct fields directly through
-    /// `ReflectMessage`, with no encode/decode round-trip and no per-field
-    /// allocation for fields that are not read.
+    /// - [`ReflectMode::Off`] — no reflection (the default).
+    /// - [`ReflectMode::Bridge`] — `reflect()` round-trips through
+    ///   `DynamicMessage`; equivalent to `generate_reflection(true)`.
+    /// - [`ReflectMode::VTable`] — `impl ReflectMessage` on owned and view
+    ///   types, and `reflect()` borrows `self` with no round-trip. Requires
+    ///   view generation (on by default).
     ///
-    /// **Experimental and `#[doc(hidden)]`.** This is a stopgap until the
-    /// public `ReflectMode` selector lands; the name and shape may change. It
-    /// is hidden from the rendered docs to avoid advertising an API that will
-    /// be superseded — internal builds use it directly.
-    #[doc(hidden)]
+    /// All non-`Off` modes require the consuming crate to depend on
+    /// `buffa-descriptor` with its `reflect` feature and on `std`. The call
+    /// site (`foo.reflect().get(fd)`) is identical across modes.
     #[must_use]
-    pub fn generate_reflection_vtable(mut self, enabled: bool) -> Self {
-        self.codegen_config.generate_reflection_vtable = enabled;
+    pub fn reflect_mode(mut self, mode: ReflectMode) -> Self {
+        mode.apply(&mut self.codegen_config);
         self
     }
 

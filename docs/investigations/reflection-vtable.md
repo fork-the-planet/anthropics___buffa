@@ -360,38 +360,58 @@ will use.
 
 ## Sequencing
 
-Step 1 (`ValueRef::List`/`Map` trait objects) has landed — see the Progress
-note. The remaining work, as a sequence of self-contained PRs each within the
-≤250-net-line budget:
+**All steps below have landed.** The feature set the original plan called for —
+view *and* owned vtable reflection, the public `ReflectMode` selector, and the
+acceptance tests — is complete and conformance-validated. One unanticipated
+prerequisite surfaced during implementation (WKT view reflection, step 3.5
+below). The remaining open items are noted under "Not yet done" at the end.
 
-1. ✅ **`ValueRef::List`/`Map` trait-object refactor.** Done. `ValueRef` carries
+1. ✅ **`ValueRef::List`/`Map` trait-object refactor.** `ValueRef` carries
    `&dyn ReflectList` / `&dyn ReflectMap`; `DynamicMessage` implements the
-   bridge side; conformance passes.
-2. **Runtime container impls for the view types (§3).** `ReflectElement` /
-   `ReflectMapKey` traits plus blanket `ReflectList` / `ReflectMap` for
-   `RepeatedView` / `MapView`, in `buffa-descriptor`. Independent of codegen and
-   testable with hand-written views. Do this first — it de-risks the rest.
-3. **`impl ReflectMessage for FooView<'a>` codegen + per-message `MessageIndex`
-   memoization (§1, §2).** The main deliverable, and the only high-risk PR.
-   Land it behind an internal mode flag so it merges without flipping any
-   default. Oneof dispatch and enum-number extraction are the tricky `get()`
-   arms.
-4. **`ReflectMode::VTable` plumbing (§4).** `BuildConfig::reflect_mode`, the
-   `CodeGenConfig` field, `feature_gates`, the `protoc-gen-buffa` option, and
-   the vtable `Reflectable::reflect()` body (`ReflectCow::Borrowed(self)`).
-   Once (3) is solid.
-5. **Acceptance: conformance via-vtable run + `OwnedView` entry-point test
-   (§5).** A `BUFFA_VIA_VTABLE` runner mode (decode_view → reflect → reflective
-   serialize), parallel to the existing `BUFFA_VIEW_JSON` / `BUFFA_VIA_REFLECT`
-   modes, plus the `OwnedView` → `&dyn ReflectMessage` test. Mostly test code;
-   a strong correctness gate.
-6. **Owned-message vtable (optional follow-up).** `impl ReflectMessage` for the
-   owned struct, for the interceptor use case that holds an in-memory message
-   rather than wire bytes. Needs container impls for owned collections
-   (`Vec<T>`), which forces the coherence resolution noted in §3: implement
-   `ReflectElement for Value` and drop the bespoke `impl ReflectList for
-   Vec<Value>`, unifying both paths. Scoped after views because views are the
-   zero-copy headline and owned vtable touches landed bridge code.
+   bridge side.
+2. ✅ **Runtime container impls (§3).** `ReflectElement` / `ReflectMapKey` traits
+   plus generic `ReflectList` / `ReflectMap` for `RepeatedView` / `MapView`
+   (and, for owned vtable, `Vec<T>` / `HashMap<K, V>`), in `buffa-descriptor`.
+3. ✅ **`impl ReflectMessage for FooView<'a>` codegen + memoized `MessageIndex`
+   (§1, §2).** Behind an internal mode flag; oneof dispatch and enum-number
+   extraction handled.
+3.5. ✅ **WKT view reflection (unplanned prerequisite).** The conformance corpus
+   references well-known types, whose views live in `buffa-types` with no path
+   to `ReflectMessage`. Added a `reflect` feature to `buffa-types` (gated via the
+   new `gate_reflect_on_crate_feature` codegen flag) so WKT views/owned types
+   implement `ReflectMessage`. Without this, vtable mode only worked for
+   WKT-free protos.
+4. ✅ **`ReflectMode` plumbing (§4).** Public `ReflectMode` enum
+   (Off/Bridge/VTable), exposed as `buffa_build::Config::reflect_mode` and
+   `protoc-gen-buffa`'s `reflect_mode=` option. Vtable mode emits
+   `impl ReflectMessage` for the view *and* the owned message and switches the
+   owned `Reflectable::reflect()` body to `ReflectCow::Borrowed(self)`. Default
+   stays `Off`/`Bridge`; flipping the default to `VTable` is deferred.
+5. ✅ **Acceptance: conformance via-vtable run + `OwnedView` entry-point test
+   (§5).** `BUFFA_VIA_VTABLE` runner mode (decode_view → reflect → rebuild →
+   JSON) passes 1246 binary→JSON cases across proto2/proto3/editions with zero
+   failures, parallel to `BUFFA_VIEW_JSON` / `BUFFA_VIA_REFLECT`. The
+   `OwnedView` → `&dyn ReflectMessage` test and an owned-vtable↔bridge parity
+   test (every field kind) lock in correctness.
+6. ✅ **Owned-message vtable (§6).** `impl ReflectMessage` for the owned struct;
+   `owned.reflect()` borrows `self` with no round-trip (the interceptor use
+   case). Required the coherence resolution noted in §3: `ReflectElement for
+   Value` and dropping the bespoke `impl ReflectList for Vec<Value>`. owned
+   `unknown_fields()` is overridden to preserve unknowns (bridge parity).
+
+### Not yet done
+
+- **Benchmark numbers in the README.** The `reflect` bench gained vtable cases
+  (6–10× over bridge, ~4× over pure `DynamicMessage`); regenerating the README
+  charts through the pinned Xeon harness is outstanding.
+
+### Done since
+
+- ✅ **`VTable` is the default reflection mode.** `generate_reflection(true)` (and
+  `protoc-gen-buffa`'s `reflection=true`) now select `VTable`; `Bridge` is opt-in
+  via `reflect_mode(ReflectMode::Bridge)`. Vtable no longer requires views — the
+  owned `impl ReflectMessage` is self-contained, so views-off builds get
+  owned-only vtable reflection rather than an error.
 
 ## What this does *not* solve
 

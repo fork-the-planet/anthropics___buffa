@@ -6,10 +6,30 @@ fn main() {
         .files(&["protos/basic.proto"])
         .includes(&["protos/"])
         .generate_text(true)
-        .generate_reflection(true)
-        .generate_reflection_vtable(true)
+        .reflect_mode(buffa_build::ReflectMode::VTable)
         .compile()
         .expect("buffa_build failed for basic.proto");
+
+    // views(false) + vtable: owned-message vtable reflection is self-contained,
+    // so it must compile without view generation (only owned impls emitted).
+    buffa_build::Config::new()
+        .files(&["protos/vtable_no_views.proto"])
+        .includes(&["protos/"])
+        .generate_views(false)
+        .reflect_mode(buffa_build::ReflectMode::VTable)
+        .compile()
+        .expect("buffa_build failed for vtable_no_views.proto");
+
+    // string_type(SmolStr) + vtable: exercises `ReflectElement for SmolStr` on
+    // the repeated-string element path (`Vec<SmolStr>`). Singular string fields
+    // reflect via deref; map string keys/values stay `String`.
+    buffa_build::Config::new()
+        .files(&["protos/vtable_string_repr.proto"])
+        .includes(&["protos/"])
+        .string_type(buffa_build::StringRepr::SmolStr)
+        .reflect_mode(buffa_build::ReflectMode::VTable)
+        .compile()
+        .expect("buffa_build failed for vtable_string_repr.proto");
 
     // Comprehensive proto3 semantics: implicit vs explicit presence for all
     // scalar types, open-enum contexts, default packing, synthetic oneofs.
@@ -116,8 +136,7 @@ fn main() {
         .files(&["protos/proto2_defaults.proto"])
         .includes(&["protos/"])
         .generate_text(true)
-        .generate_reflection(true)
-        .generate_reflection_vtable(true)
+        .reflect_mode(buffa_build::ReflectMode::VTable)
         .compile()
         .expect("buffa_build failed for proto2_defaults.proto");
 

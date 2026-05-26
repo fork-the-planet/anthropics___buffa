@@ -9,6 +9,27 @@ pub mod basic {
     buffa::include_proto!("basic");
 }
 
+/// `string_type(SmolStr)` + vtable reflection — exercises `ReflectElement for
+/// SmolStr` on the repeated-string element path.
+#[allow(
+    clippy::derivable_impls,
+    clippy::match_single_binding,
+    non_camel_case_types
+)]
+pub mod vtable_string_repr {
+    buffa::include_proto!("vtable_string_repr");
+}
+
+/// `generate_views(false)` + vtable reflection — owned-only vtable, no views.
+#[allow(
+    clippy::derivable_impls,
+    clippy::match_single_binding,
+    non_camel_case_types
+)]
+pub mod vtable_no_views {
+    buffa::include_proto!("vtable_no_views");
+}
+
 #[allow(
     clippy::derivable_impls,
     clippy::match_single_binding,

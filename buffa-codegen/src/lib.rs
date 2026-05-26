@@ -36,6 +36,7 @@ pub(crate) mod imports;
 pub(crate) mod message;
 pub(crate) mod oneof;
 pub(crate) mod reflect;
+pub(crate) mod reflect_owned;
 pub(crate) mod reflect_view;
 pub(crate) mod view;
 
@@ -226,6 +227,43 @@ impl StringRepr {
     /// native `Arbitrary`) instead of the generic `ProtoString` ones.
     pub(crate) fn is_default(self) -> bool {
         matches!(self, StringRepr::String)
+    }
+}
+
+/// How much reflection support generated types get.
+///
+/// Selected through `buffa_build`'s `reflect_mode` builder method (or the
+/// `protoc-gen-buffa` `reflect_mode=` option). All modes need the consuming
+/// crate to depend on `buffa-descriptor` with its `reflect` feature and on
+/// `std`; the call site is `foo.reflect().get(fd)` regardless of mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ReflectMode {
+    /// No reflection impls.
+    #[default]
+    Off,
+    /// `Reflectable::reflect()` round-trips the message through a
+    /// `DynamicMessage` (encode → decode → boxed handle). Smaller generated
+    /// code; pays an allocation and a re-encode per `reflect()` call.
+    Bridge,
+    /// `impl ReflectMessage` directly on the owned and view types, and
+    /// `Reflectable::reflect()` borrows `self` with no round-trip. Larger
+    /// generated code; near-free reflective access. Requires view generation.
+    VTable,
+}
+
+impl ReflectMode {
+    /// Apply this mode to a [`CodeGenConfig`] (sets `generate_reflection` /
+    /// `generate_reflection_vtable`). Used by the `buffa-build` and
+    /// `protoc-gen-buffa` front-ends.
+    pub fn apply(self, config: &mut CodeGenConfig) {
+        let (reflection, vtable) = match self {
+            ReflectMode::Off => (false, false),
+            ReflectMode::Bridge => (true, false),
+            ReflectMode::VTable => (true, true),
+        };
+        config.generate_reflection = reflection;
+        config.generate_reflection_vtable = vtable;
     }
 }
 
@@ -478,15 +516,20 @@ pub struct CodeGenConfig {
     ///
     /// Defaults to `false`.
     pub generate_reflection: bool,
-    /// Additionally emit `impl ReflectMessage` / `impl ReflectElement` on view
-    /// types (vtable mode), on top of the bridge-mode `Reflectable` impl.
+    /// Emit vtable-mode reflection: `impl ReflectMessage` / `impl
+    /// ReflectElement` on **both** the view types and the owned message
+    /// structs, and switch the owned `Reflectable::reflect()` body to borrow
+    /// `self` (`ReflectCow::Borrowed(self)`) instead of the bridge round-trip.
     ///
-    /// Requires [`generate_reflection`](Self::generate_reflection) (the vtable
-    /// impls resolve against the same embedded `DescriptorPool`) and
-    /// [`generate_views`](Self::generate_views). Internal flag, not yet exposed
-    /// through `buffa-build`; the public `ReflectMode` surface is wired
-    /// separately. Vtable mode reads view struct fields directly — no
-    /// encode/decode round-trip and no per-field allocation.
+    /// Reflective access then reads struct fields in place — no encode/decode
+    /// round-trip and no per-field allocation — for both a decoded view and an
+    /// in-memory owned message.
+    ///
+    /// Requires [`generate_reflection`](Self::generate_reflection) (the impls
+    /// resolve against the same embedded `DescriptorPool`) and
+    /// [`generate_views`](Self::generate_views). Set via [`ReflectMode::VTable`]
+    /// — front-ends expose it as `buffa_build::Config::reflect_mode` /
+    /// `protoc-gen-buffa`'s `reflect_mode=vtable`.
     ///
     /// Defaults to `false`.
     pub generate_reflection_vtable: bool,
@@ -820,24 +863,23 @@ pub fn generate(
 ///
 /// Returns [`CodeGenError::FileNotFound`] if a name in `files_to_generate` has
 /// no matching descriptor, [`CodeGenError::Other`] if `generate_reflection_vtable`
-/// is set without `generate_reflection` and `generate_views`, and other
-/// [`CodeGenError`] variants for malformed descriptors (e.g. a missing required
-/// field) encountered while generating.
+/// is set without `generate_reflection`, and other [`CodeGenError`] variants for
+/// malformed descriptors (e.g. a missing required field) encountered while
+/// generating.
 pub fn generate_with_diagnostics(
     file_descriptors: &[FileDescriptorProto],
     files_to_generate: &[String],
     config: &CodeGenConfig,
 ) -> Result<(Vec<GeneratedFile>, Vec<CodeGenWarning>), CodeGenError> {
-    // Vtable reflection emits `impl ReflectMessage` on view types and resolves
-    // against the per-package descriptor pool, so it needs both view generation
-    // and bridge-mode reflection (which emits that pool). Without this check the
-    // flag would silently emit nothing and the consumer would hit an opaque
-    // "FooView: ReflectMessage is not satisfied" error far from the cause.
-    if config.generate_reflection_vtable && (!config.generate_reflection || !config.generate_views)
-    {
+    // Vtable reflection resolves against the per-package descriptor pool, which
+    // is emitted by bridge-mode reflection — so it requires `generate_reflection`.
+    // It does NOT require views: the owned `impl ReflectMessage` is self-contained,
+    // so with views off, vtable mode still emits owned-message reflection (the
+    // view impls are simply skipped along with the views).
+    if config.generate_reflection_vtable && !config.generate_reflection {
         return Err(CodeGenError::Other(
-            "generate_reflection_vtable requires both generate_reflection and \
-             generate_views to be enabled"
+            "generate_reflection_vtable requires generate_reflection to be enabled \
+             (it provides the descriptor pool the reflect impls resolve against)"
                 .into(),
         ));
     }
