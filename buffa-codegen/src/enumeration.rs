@@ -252,6 +252,31 @@ pub fn generate_enum(
         quote! {}
     };
 
+    // Vtable-mode reflection: closed enums appear as bare `#name_ident` in
+    // `RepeatedView` / `MapView`, so they need a `ReflectElement` impl for the
+    // generic container impls to apply. Open enums use `EnumValue<E>`, which
+    // `buffa-descriptor` already covers, so the impl is emitted only for closed
+    // enums — emitting it for open ones would just be dead `cargo doc` noise.
+    let reflect_element_impl = if ctx.config.generate_reflection
+        && ctx.config.generate_reflection_vtable
+        && crate::message::is_closed_enum(features)
+    {
+        crate::feature_gates::cfg_block(
+            quote! {
+                impl ::buffa_descriptor::reflect::ReflectElement for #name_ident {
+                    fn as_value_ref(&self) -> ::buffa_descriptor::reflect::ValueRef<'_> {
+                        ::buffa_descriptor::reflect::ValueRef::EnumNumber(
+                            ::buffa::Enumeration::to_i32(self),
+                        )
+                    }
+                }
+            },
+            ctx.config.feature_gates().reflect,
+        )
+    } else {
+        quote! {}
+    };
+
     let enum_doc = {
         let base =
             crate::comments::doc_attrs_resolved(ctx.comment(proto_fqn), proto_fqn, &ctx.type_map);
@@ -312,6 +337,8 @@ pub fn generate_enum(
                 &[#(Self::#value_idents),*]
             }
         }
+
+        #reflect_element_impl
     })
 }
 

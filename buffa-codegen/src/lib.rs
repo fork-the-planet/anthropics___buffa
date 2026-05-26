@@ -36,6 +36,7 @@ pub(crate) mod imports;
 pub(crate) mod message;
 pub(crate) mod oneof;
 pub(crate) mod reflect;
+pub(crate) mod reflect_view;
 pub(crate) mod view;
 
 use crate::generated::descriptor::FileDescriptorProto;
@@ -404,6 +405,12 @@ pub struct CodeGenConfig {
     /// `feature = "arbitrary"` regardless of this flag, because `arbitrary`
     /// is an optional dependency by design.
     ///
+    /// When [`generate_reflection`](Self::generate_reflection) is also on, the
+    /// reflection impls are gated on `feature = "reflect"` alongside
+    /// json/views/text. To gate *only* reflection without gating json/views/text,
+    /// use [`gate_reflect_on_crate_feature`](Self::gate_reflect_on_crate_feature)
+    /// instead.
+    ///
     /// This is the mechanism that lets `buffa-descriptor` and `buffa-types`
     /// ship every impl while keeping the codegen toolchain
     /// (`buffa-codegen`/`buffa-build`/`protoc-gen-buffa`) lean: those crates
@@ -459,10 +466,9 @@ pub struct CodeGenConfig {
     ///
     /// **Performance** — `reflect()` is one full encode/decode round-trip
     /// plus a heap allocation. The first call also pays a one-time pool
-    /// build cost (linking the embedded `FileDescriptorSet`). The vtable
-    /// mode (zero-copy reflective access) is a deferred follow-up; the
-    /// call-site contract is the same either way, so flipping modes later
-    /// requires no consumer-code diff.
+    /// build cost (linking the embedded `FileDescriptorSet`). For zero-copy
+    /// reflective access over view types without the round-trip, additionally
+    /// enable [`generate_reflection_vtable`](Self::generate_reflection_vtable).
     ///
     /// **Binary size** — each package embeds its own copy of the full
     /// `FileDescriptorSet` (transitive closure). For a multi-package
@@ -472,6 +478,39 @@ pub struct CodeGenConfig {
     ///
     /// Defaults to `false`.
     pub generate_reflection: bool,
+    /// Additionally emit `impl ReflectMessage` / `impl ReflectElement` on view
+    /// types (vtable mode), on top of the bridge-mode `Reflectable` impl.
+    ///
+    /// Requires [`generate_reflection`](Self::generate_reflection) (the vtable
+    /// impls resolve against the same embedded `DescriptorPool`) and
+    /// [`generate_views`](Self::generate_views). Internal flag, not yet exposed
+    /// through `buffa-build`; the public `ReflectMode` surface is wired
+    /// separately. Vtable mode reads view struct fields directly — no
+    /// encode/decode round-trip and no per-field allocation.
+    ///
+    /// Defaults to `false`.
+    pub generate_reflection_vtable: bool,
+    /// Gate the reflection impls behind a `reflect` crate feature, *without*
+    /// gating json/views/text (unlike
+    /// [`gate_impls_on_crate_features`](Self::gate_impls_on_crate_features),
+    /// which gates them all together).
+    ///
+    /// Used by crates that ship view/text impls unconditionally but want the
+    /// reflection surface — which pulls a `buffa-descriptor` dependency and
+    /// `std` — to be opt-in. `buffa-types` is the motivating case: its WKT
+    /// views are always available, but `impl ReflectMessage` for them is gated
+    /// behind `buffa-types`'s `reflect` feature.
+    ///
+    /// When [`gate_impls_on_crate_features`](Self::gate_impls_on_crate_features)
+    /// is already on, reflection is gated regardless and this flag is ignored.
+    ///
+    /// A low-level knob for crates whose generated code is a public interface
+    /// (`buffa-types`, the conformance harness). Set directly by `gen_wkt_types`
+    /// and exposed through `buffa_build::Config::gate_reflect_on_crate_feature`
+    /// (currently `#[doc(hidden)]`, paired with the experimental vtable flag).
+    ///
+    /// Defaults to `false`.
+    pub gate_reflect_on_crate_feature: bool,
     /// Emit idiomatic `UpperCamelCase` constant aliases alongside each enum
     /// variant.
     ///
@@ -526,6 +565,8 @@ impl Default for CodeGenConfig {
             gate_impls_on_crate_features: false,
             generate_with_setters: true,
             generate_reflection: false,
+            generate_reflection_vtable: false,
+            gate_reflect_on_crate_feature: false,
             idiomatic_enum_aliases: true,
         }
     }
@@ -778,13 +819,29 @@ pub fn generate(
 /// # Errors
 ///
 /// Returns [`CodeGenError::FileNotFound`] if a name in `files_to_generate` has
-/// no matching descriptor, and other [`CodeGenError`] variants for malformed
-/// descriptors (e.g. a missing required field) encountered while generating.
+/// no matching descriptor, [`CodeGenError::Other`] if `generate_reflection_vtable`
+/// is set without `generate_reflection` and `generate_views`, and other
+/// [`CodeGenError`] variants for malformed descriptors (e.g. a missing required
+/// field) encountered while generating.
 pub fn generate_with_diagnostics(
     file_descriptors: &[FileDescriptorProto],
     files_to_generate: &[String],
     config: &CodeGenConfig,
 ) -> Result<(Vec<GeneratedFile>, Vec<CodeGenWarning>), CodeGenError> {
+    // Vtable reflection emits `impl ReflectMessage` on view types and resolves
+    // against the per-package descriptor pool, so it needs both view generation
+    // and bridge-mode reflection (which emits that pool). Without this check the
+    // flag would silently emit nothing and the consumer would hit an opaque
+    // "FooView: ReflectMessage is not satisfied" error far from the cause.
+    if config.generate_reflection_vtable && (!config.generate_reflection || !config.generate_views)
+    {
+        return Err(CodeGenError::Other(
+            "generate_reflection_vtable requires both generate_reflection and \
+             generate_views to be enabled"
+                .into(),
+        ));
+    }
+
     let ctx = context::CodeGenContext::for_generate(file_descriptors, files_to_generate, config);
 
     // Group requested files by package. BTreeMap → deterministic output order.
