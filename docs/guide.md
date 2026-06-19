@@ -34,7 +34,6 @@ This is **optional** — it does not install the library. It puts the `protoc-ge
 | `json` | No | Proto-canonical JSON via serde (works with `no_std` + `alloc`) |
 | `arbitrary` | No | `arbitrary::Arbitrary` derive on generated types, for fuzzing |
 | `text` (`buffa` only) | No | Text format (`textproto`) encode/decode — see [Text format](#text-format-textproto) |
-| `smol_str`, `ecow`, `compact_str` (`buffa` only) | No | Alternative owned representations for `string` fields, selected with the `string_type` codegen option — see [String field representations](#string-field-representations) |
 | `reflect` (`buffa-types` only) | No | `ReflectMessage` impls for the well-known types, so messages that embed WKTs reflect end to end — see [Runtime reflection](#runtime-reflection) |
 
 ```toml
@@ -197,8 +196,10 @@ The macro pulls in `OUT_DIR/<dotted.pkg>.mod.rs`, which in turn includes the per
 | `.type_name_prefix(prefix)` | `""` | Prepend a PascalCase prefix (`[A-Z][A-Za-z0-9]*`; anything else is rejected at generation time) to every generated message/enum type name (`message User` → `struct RpcUser`); modules, oneof enums, extern-mapped types, and the wire format are unaffected. A crate referencing these types via `extern_path` must spell out the prefixed name (`::crate_a::RpcUser`) |
 | `.use_bytes_type()` | — | Use `bytes::Bytes` for all bytes fields, including `map<K, bytes>` values |
 | `.use_bytes_type_in(&[...])` | — | Use `bytes::Bytes` for matching bytes fields (same `map<K, bytes>` rule) |
-| `.string_type(repr)` | `String` | Use an alternative owned representation (`SmolStr`, `EcoString`, `CompactString`) for all string fields (see [String field representations](#string-field-representations)) |
-| `.string_type_in(repr, &[...])` | — | Use an alternative string representation for matching string fields |
+| `.string_type_custom(path)` | `String` | Use a custom owned string representation that implements `ProtoString`, named by Rust path (e.g. `"::buffa_smolstr::SmolStr"`), for all string fields (see [String and bytes field representations](#string-and-bytes-field-representations)) |
+| `.string_type_custom_in(path, &[...])` | — | Use a custom string representation for matching string fields |
+| `.bytes_type(repr)` / `.bytes_type_in(repr, &[...])` | `Vec<u8>` | Owned `bytes` representation: `BytesRepr::{Vec, Bytes, Custom(path)}` (`use_bytes_type` is the `Bytes` alias) |
+| `.bytes_type_custom(path)` / `.bytes_type_custom_in(path, &[...])` | — | Use a custom `bytes` representation by Rust path |
 | `.generate_reflection(bool)` | `false` | Emit reflection support (vtable mode) plus an embedded per-package descriptor pool (see [Runtime reflection](#runtime-reflection)) |
 | `.reflect_mode(mode)` | `Off` | Finer-grained reflection selector: `ReflectMode::{Off, Bridge, VTable}` |
 | `.idiomatic_enum_aliases(bool)` | `true` | Emit `UpperCamelCase` associated-const aliases for enum values (see the aliases note under `EnumValue<T>`) |
@@ -294,40 +295,53 @@ When several entries could match a reference, the most specific one wins: an exa
 
 **View types:** When view generation is enabled (the default), the codegen also expects a `FooView<'a>` type at `<extern_crate>::__buffa::view::FooView` for each extern-mapped message `Foo`. If you're using extern_path to reference types from another buffa-generated crate, the views are already there. If you're mapping to [custom type implementations](#custom-type-implementations), see that section for how to provide the view type. This applies to per-type mappings too: a message referenced by generated views must map to a buffa-generated crate, or view generation must be disabled (`.generate_views(false)`).
 
-### String field representations
+### String and bytes field representations
 
-By default every proto `string` field is generated as `String`. For schemas dominated by many short strings — log labels, identifiers, header-like maps — a small-string type can avoid most of those heap allocations. The `string_type` option selects an alternative owned representation, with the same path-prefix rules as `use_bytes_type_in`:
+By default every proto `string` field is generated as `String` and every `bytes` field as `Vec<u8>`. For schemas dominated by many short strings — log labels, identifiers, header-like maps — a small-string type can avoid most of those heap allocations. The `string_type` / `bytes_type` options select an alternative owned representation, with the same path-prefix rules as `use_bytes_type_in` (rules accumulate, last match wins):
 
 ```rust,ignore
-use buffa_build::StringRepr;
-
 buffa_build::Config::new()
-    // Broad default first: every string field becomes SmolStr…
-    .string_type(StringRepr::SmolStr)
-    // …then narrower overrides. Rules accumulate and the last match wins.
-    .string_type_in(StringRepr::CompactString, &[".my.pkg.LogRecord.message"])
+    // Broad default first: every string field becomes the buffa-smolstr newtype…
+    .string_type_custom("::buffa_smolstr::SmolStr")
+    // …then narrower overrides, pointing at your own ProtoString newtype.
+    .string_type_custom_in("::my_crate::CompactStr", &[".my.pkg.LogRecord.message"])
+    // bytes fields: the built-in zero-copy Bytes, or your own ProtoBytes newtype.
+    .bytes_type_custom("::my_crate::SmallBytes")
     .files(&["proto/my_service.proto"])
     .includes(&["proto/"])
     .compile()
     .unwrap();
 ```
 
-The available representations (`buffa_build::StringRepr`, sizes for 64-bit targets):
+A representation is **any type that implements `buffa::ProtoString` / `buffa::ProtoBytes`**. Each trait requires a `from_wire(WirePayload<'_>) -> Result<Self, DecodeError>` decode constructor, plus the supertraits `Clone + PartialEq + Default + Debug + Send + Sync`, `Deref` to `str` / `[u8]`, `AsRef`, and `From<String>` / `From<Vec<u8>>`. `from_wire` lets the type decide validation and borrow-vs-own — an inline string type stores a short value with no heap allocation. buffa ships the built-in impls for `String`, `Vec<u8>`, and `bytes::Bytes`; for `bytes`, `bytes_type(BytesRepr::Bytes)` (and the `use_bytes_type` / `use_bytes_type_in` aliases) selects `bytes::Bytes`, which decodes zero-copy from a `Bytes`-backed buffer.
 
-| Representation | Size | Inline capacity | Mutability | Required `buffa` feature |
-|---|---|---|---|---|
-| `String` (default) | 24 bytes | — | Mutable, growable | none |
-| `SmolStr` | 24 bytes | 23 bytes | Immutable (assign a new value to mutate); `O(1)` clone | `smol_str` |
-| `EcoString` | 16 bytes | 15 bytes | Immutable (assign a new value to mutate); clone-on-write, `O(1)` clone | `ecow` |
-| `CompactString` | 24 bytes | 24 bytes | Mutable (drop-in `String` replacement) | `compact_str` |
+**A foreign type cannot implement these traits directly** (orphan rule), so wrap it in a small local newtype. The `buffa-smolstr` crate is the ready-made one for `smol_str::SmolStr` and the template for the rest:
 
-Three things to keep in mind:
+```rust,ignore
+use buffa::{DecodeError, ProtoString, WirePayload};
 
-- **Only the owned struct field type changes.** The wire format is identical regardless of representation, view types still borrow `&str`, and `map<_, string>` keys and values always stay `String`.
-- **Rules accumulate and the last match wins**, so call the broad `string_type` before narrower `string_type_in` overrides — a `"."` rule added later shadows earlier specific rules.
-- **The consuming crate must enable the matching `buffa` feature** (`smol_str`, `ecow`, or `compact_str`). The feature re-exports the chosen crate so generated code can reference it without you adding the dependency yourself; without it, the generated `::buffa::smol_str::SmolStr` (and similar) paths fail to resolve.
+#[derive(Clone, PartialEq, Eq, Default, Debug)]
+pub struct CompactStr(pub compact_str::CompactString);
+// … Deref<str>, AsRef<str>, From<String>, From<&str> forwards …
+impl ProtoString for CompactStr {
+    fn from_wire(p: WirePayload<'_>) -> Result<Self, DecodeError> {
+        let s = core::str::from_utf8(p.as_slice()).map_err(|_| DecodeError::InvalidUtf8)?;
+        Ok(CompactStr(s.into()))
+    }
+}
+```
 
-`string_type` is a `buffa-build` / `buffa-codegen` option only — there is no `protoc-gen-buffa` plugin equivalent yet.
+If you see a `ProtoString` / `ProtoBytes` bound error pointing at *generated* code, your newtype is missing one of the supertraits — check the full bound list (`Clone + PartialEq + Default + Debug + Send + Sync`, `Deref`, `AsRef`, the `From` conversions, and `from_wire`).
+
+Key points:
+
+- **Point `string_type_custom` at your newtype, not the foreign type.** `string_type_custom("::smol_str::SmolStr")` no longer compiles — use `::buffa_smolstr::SmolStr` or your own newtype path. Add the newtype's crate (e.g. `buffa-smolstr`) to your `Cargo.toml`.
+- **Only the owned struct field type changes.** The wire format is identical regardless of representation, view types still borrow `&str` / `&[u8]`, and `map` keys/values keep their default type.
+- **A custom type needs no `Arbitrary` impl.** Under `generate_arbitrary`, codegen attaches a generic builder.
+- **JSON of an `optional` or `repeated` custom string** serializes through the element's native `serde`, so such a newtype must derive `Serialize` / `Deserialize` (`buffa-smolstr`'s `serde` feature does this). Singular and oneof string fields use buffa's `proto_string` with-module and need no `serde` impl.
+- **A custom type used as a `repeated` element must be crate-local.** Codegen emits per-element `ReflectElement` (vtable reflection) and base64 `ProtoElemJson` (JSON, bytes only) impls for it, which the orphan rule forbids for a foreign type — the newtype satisfies this since it is local. Singular / optional / oneof / map uses have no such restriction.
+
+`string_type` / `bytes_type` are `buffa-build` / `buffa-codegen` options only — there is no `protoc-gen-buffa` plugin equivalent yet.
 
 ### Multi-package projects
 
@@ -1838,9 +1852,11 @@ Two Cargo notes:
   feature, and generated reflection requires `std` (the embedded pool sits
   behind a `std::sync::OnceLock`).
 - Messages that embed well-known types reflect end to end when `buffa-types`
-  is built with its `reflect` feature; fields using an alternative
-  [string representation](#string-field-representations) need the matching
-  `buffa-descriptor` feature (`smol_str`, `ecow`, `compact_str`).
+  is built with its `reflect` feature. A custom
+  [string/bytes representation](#string-and-bytes-field-representations) used as
+  a `repeated` element gets its `ReflectElement` impl emitted by codegen and so
+  must be a crate-local type (the orphan rule forbids it for a foreign type);
+  singular/optional/oneof uses need nothing extra.
 
 For the cost of reflection relative to the generated codec — and when to
 prefer views instead — see the [README's reflection

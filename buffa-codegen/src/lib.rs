@@ -176,71 +176,165 @@ pub enum GeneratedFileKind {
     Companion,
 }
 
+/// Parse a custom owned-type path string (e.g. `"::smol_str::SmolStr"`) into a
+/// token stream, validating it as a Rust type so a malformed path surfaces as a
+/// codegen error rather than unparseable generated output.
+pub(crate) fn parse_custom_type_path(path: &str) -> Result<proc_macro2::TokenStream, CodeGenError> {
+    let ty: syn::Type =
+        syn::parse_str(path).map_err(|_| CodeGenError::InvalidTypePath(path.to_string()))?;
+    Ok(quote::quote! { #ty })
+}
+
 /// The Rust type a proto `string` field maps to in generated owned structs.
 ///
-/// The default is [`String`](StringRepr::String). The other variants are
-/// small-string-optimized types that avoid `String`'s growable buffer for
-/// read-mostly schemas; each is gated behind the matching `buffa` Cargo feature
-/// (`smol_str`, `ecow`, `compact_str`), and the downstream crate must enable
-/// that feature so the re-exported type path (`::buffa::smol_str::SmolStr`,
-/// etc.) resolves.
+/// The default is [`String`](StringRepr::String).
+/// [`Custom`](StringRepr::Custom) substitutes any type named by its
+/// fully-qualified Rust path — for example `::smol_str::SmolStr`,
+/// `::ecow::EcoString`, or `::compact_str::CompactString` for read-mostly
+/// schemas — that satisfies the `buffa::ProtoString` bound. The downstream crate
+/// must itself depend on the crate providing that type (buffa does not re-export
+/// it).
 ///
 /// Select a representation through `buffa_build`'s `string_type` /
-/// `string_type_in` builder methods. The wire format is identical regardless of
-/// representation — only the in-memory owned type changes; view types keep
+/// `string_type_custom` builder methods. The wire format is identical regardless
+/// of representation — only the in-memory owned type changes; view types keep
 /// borrowing `&str`, and `map<_, string>` / `map<string, _>` keys and values
 /// always stay `String`.
-///
-/// Sizes below are for 64-bit targets. See the buffa README for a fuller
-/// comparison of the small-string crates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum StringRepr {
-    /// `::buffa::alloc::string::String` — 24-byte struct, growable and mutable
-    /// (the default).
+    /// `::buffa::alloc::string::String` — growable and mutable (the default).
     #[default]
     String,
-    /// `smol_str::SmolStr` — 24-byte struct, inlines up to 23 bytes, `O(1)`
-    /// clone of long strings via `Arc<str>`. **Immutable** (assign a new value
-    /// to mutate). Requires the `buffa/smol_str` feature.
-    SmolStr,
-    /// `ecow::EcoString` — 16-byte struct, inlines up to 15 bytes, clone-on-write
-    /// with `O(1)` clone. **Immutable** (assign a new value to mutate).
-    /// Requires the `buffa/ecow` feature.
-    EcoString,
-    /// `compact_str::CompactString` — 24-byte struct, inlines up to 24 bytes,
-    /// mutable (a drop-in `String` replacement). Requires the
-    /// `buffa/compact_str` feature.
-    CompactString,
+    /// A custom type named by its fully-qualified Rust path (e.g.
+    /// `"::smol_str::SmolStr"`). Must satisfy `buffa::ProtoString` and be
+    /// provided by a crate the downstream depends on.
+    ///
+    /// # Limitations
+    ///
+    /// - A *foreign* custom type used as a `repeated` element fails to compile
+    ///   (the emitted `ReflectElement` impl violates the orphan rule). Wrap it
+    ///   in a crate-local newtype for that case; singular / optional / oneof /
+    ///   map uses work with a foreign type directly.
+    /// - A path that does not parse as a Rust type surfaces as
+    ///   [`CodeGenError::InvalidTypePath`] at generation (`.compile()`) time.
+    /// - The per-element impls are deduplicated within a single generation, but
+    ///   the *same* crate-local type used as a `repeated` element across two
+    ///   separate `compile()` invocations in one crate emits the impl twice (a
+    ///   duplicate-impl `E0119`). Generate from a single `compile()`, or use
+    ///   distinct element types.
+    Custom(String),
 }
 
 impl StringRepr {
     /// The owned Rust type path emitted for a `string` field with this
     /// representation.
     ///
-    /// `ctx` and `nesting` route the default `String` through the
-    /// package-root import registry (`idiomatic_imports`); the non-default
-    /// representations stay fully qualified.
+    /// `ctx` and `nesting` route the default `String` through the package-root
+    /// import registry (`idiomatic_imports`); a custom path is parsed and
+    /// emitted fully qualified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodeGenError::InvalidTypePath`] if a custom path does not parse
+    /// as a Rust type.
     pub(crate) fn type_path(
-        self,
+        &self,
         resolver: &imports::ImportResolver,
         ctx: &context::CodeGenContext,
         nesting: usize,
-    ) -> proc_macro2::TokenStream {
-        use quote::quote;
+    ) -> Result<proc_macro2::TokenStream, CodeGenError> {
         match self {
-            StringRepr::String => resolver.string_at(ctx, nesting),
-            StringRepr::SmolStr => quote! { ::buffa::smol_str::SmolStr },
-            StringRepr::EcoString => quote! { ::buffa::ecow::EcoString },
-            StringRepr::CompactString => quote! { ::buffa::compact_str::CompactString },
+            StringRepr::String => Ok(resolver.string_at(ctx, nesting)),
+            StringRepr::Custom(path) => parse_custom_type_path(path),
         }
     }
 
     /// Whether this is the default `String` representation, which keeps the
     /// `String`-specialized fast paths (in-place `merge_string`, `clear()`,
     /// native `Arbitrary`) instead of the generic `ProtoString` ones.
-    pub(crate) fn is_default(self) -> bool {
+    pub(crate) fn is_default(&self) -> bool {
         matches!(self, StringRepr::String)
+    }
+}
+
+/// The Rust type a proto `bytes` field maps to in generated owned structs.
+///
+/// The default is [`Vec`](BytesRepr::Vec) (`Vec<u8>`). [`Bytes`](BytesRepr::Bytes)
+/// uses [`bytes::Bytes`](::bytes::Bytes), which decodes zero-copy from a
+/// `Bytes`-backed buffer. [`Custom`](BytesRepr::Custom) substitutes any type
+/// named by its fully-qualified Rust path that satisfies the `buffa::ProtoBytes`
+/// bound; the downstream crate must itself depend on the providing crate.
+///
+/// Select a representation through `buffa_build`'s `bytes_type` /
+/// `bytes_type_custom` builder methods (or the legacy `use_bytes_type`, which
+/// selects [`Bytes`](BytesRepr::Bytes)). The wire format is identical regardless
+/// of representation; view types keep borrowing `&[u8]`, and `map` bytes values
+/// follow the same rules as the string path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum BytesRepr {
+    /// `::buffa::alloc::vec::Vec<u8>` — growable and mutable (the default).
+    #[default]
+    Vec,
+    /// `::buffa::bytes::Bytes` — reference-counted, immutable, decodes zero-copy
+    /// from a `Bytes`-backed buffer.
+    Bytes,
+    /// A custom type named by its fully-qualified Rust path. Must satisfy
+    /// `buffa::ProtoBytes` and be provided by a crate the downstream depends on.
+    ///
+    /// # Limitations
+    ///
+    /// - A *foreign* custom type used as a `repeated` element fails to compile
+    ///   (the emitted `ReflectElement` / `ProtoElemJson` impls violate the
+    ///   orphan rule). Wrap it in a crate-local newtype for that case; singular
+    ///   / optional / oneof uses work with a foreign type directly.
+    /// - A `Custom` rule does **not** apply to `map<K, bytes>` values — they
+    ///   stay `Vec<u8>`. Only the built-in [`Bytes`](BytesRepr::Bytes) applies
+    ///   to map values.
+    /// - A path that does not parse as a Rust type surfaces as
+    ///   [`CodeGenError::InvalidTypePath`] at generation (`.compile()`) time.
+    /// - The per-element impls are deduplicated within a single generation, but
+    ///   the *same* crate-local type used as a `repeated` element across two
+    ///   separate `compile()` invocations in one crate emits the impl twice (a
+    ///   duplicate-impl `E0119`). Generate from a single `compile()`, or use
+    ///   distinct element types.
+    Custom(String),
+}
+
+impl BytesRepr {
+    /// The owned Rust type path emitted for a `bytes` field with this
+    /// representation.
+    ///
+    /// `ctx` and `nesting` route the default `Vec<u8>` through the package-root
+    /// import registry; `Bytes` and a custom path are emitted fully qualified.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodeGenError::InvalidTypePath`] if a custom path does not parse
+    /// as a Rust type.
+    pub(crate) fn type_path(
+        &self,
+        resolver: &imports::ImportResolver,
+        ctx: &context::CodeGenContext,
+        nesting: usize,
+    ) -> Result<proc_macro2::TokenStream, CodeGenError> {
+        use quote::quote;
+        match self {
+            BytesRepr::Vec => {
+                let vec = resolver.vec_at(ctx, nesting);
+                Ok(quote! { #vec<u8> })
+            }
+            BytesRepr::Bytes => Ok(quote! { ::buffa::bytes::Bytes }),
+            BytesRepr::Custom(path) => parse_custom_type_path(path),
+        }
+    }
+
+    /// Whether this is the default `Vec<u8>` representation, which keeps the
+    /// `Vec`-specialized fast paths (in-place `merge_bytes`, `clear()`, native
+    /// `Arbitrary`) instead of the generic `ProtoBytes` ones.
+    pub(crate) fn is_default(&self) -> bool {
+        matches!(self, BytesRepr::Vec)
     }
 }
 
@@ -371,13 +465,12 @@ pub struct CodeGenConfig {
     /// entry here. To override with a custom implementation, add an
     /// `extern_path` for `.google.protobuf` pointing to your crate.
     pub extern_paths: Vec<(String, String)>,
-    /// Fully-qualified proto field paths whose `bytes` fields should use
-    /// `bytes::Bytes` instead of `Vec<u8>`.
-    ///
-    /// Each entry is a proto path prefix (e.g., `".my.pkg.MyMessage.data"` for
-    /// a specific field, or `"."` for all bytes fields). The path is matched
-    /// as a prefix, so `"."` applies to every bytes field in every message.
-    pub bytes_fields: Vec<String>,
+    /// Ordered (proto-path-prefix, [`BytesRepr`]) rules selecting the Rust type
+    /// for `bytes` fields. Later rules win, so a broad rule (e.g. `"."` →
+    /// `Bytes`) can be refined by a more specific one. Fields matching no rule
+    /// use `Vec<u8>`. The path is matched with the same proto-segment-aware
+    /// prefix logic as [`string_fields`](Self::string_fields).
+    pub bytes_fields: Vec<(String, BytesRepr)>,
     /// Ordered (proto-path-prefix, [`StringRepr`]) rules selecting the Rust type
     /// for `string` fields. Later rules win, so a broad rule (e.g. `"."` →
     /// `SmolStr`) can be refined by a more specific one
@@ -1102,6 +1195,177 @@ pub fn generate(
 /// [`CodeGenConfig::feature_gate_names`] is not a valid Cargo feature name,
 /// and other [`CodeGenError`] variants for malformed descriptors (e.g. a
 /// missing required field) encountered while generating.
+/// Whether a custom `repeated` element type holds proto `string` or `bytes` —
+/// selects `ValueRef::String`/`ValueRef::Bytes` and the JSON delegate module.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CustomElemKind {
+    String,
+    Bytes,
+}
+
+/// Collect the distinct custom owned types that need a codegen-emitted element
+/// impl (`ReflectElement` / `ProtoElemJson`), keyed by Rust type path, across
+/// the whole request. These are custom `string`/`bytes` types used as the
+/// element of a `repeated` field, and custom `bytes` types used as a
+/// `map<K, bytes>` value — both reflect via the element trait and (for bytes)
+/// serialize JSON via `proto_map`/`proto_seq`. Singular / optional / oneof
+/// custom fields reach JSON and reflection without an element-trait impl, and
+/// `string`/`Vec<u8>`/`Bytes` map values are covered by the built-in impls.
+fn collect_custom_elements(
+    ctx: &context::CodeGenContext,
+    file_descriptors: &[FileDescriptorProto],
+    files_to_generate: &[String],
+) -> std::collections::BTreeMap<String, CustomElemKind> {
+    use crate::generated::descriptor::field_descriptor_proto::{Label, Type};
+
+    fn walk(
+        ctx: &context::CodeGenContext,
+        messages: &[crate::generated::descriptor::DescriptorProto],
+        scope: &str,
+        parent_features: &crate::features::ResolvedFeatures,
+        out: &mut std::collections::BTreeMap<String, CustomElemKind>,
+    ) {
+        for msg in messages {
+            let name = msg.name.as_deref().unwrap_or("");
+            let fqn = if scope.is_empty() {
+                name.to_string()
+            } else {
+                format!("{scope}.{name}")
+            };
+            let msg_features = crate::features::resolve_child(
+                parent_features,
+                crate::features::message_features(msg),
+            );
+            for field in &msg.field {
+                if field.label.unwrap_or_default() != Label::LABEL_REPEATED {
+                    continue;
+                }
+                let field_name = field.name.as_deref().unwrap_or("");
+                let field_fqn = format!(".{fqn}.{field_name}");
+
+                // `map<K, bytes>` value: a custom value type needs the element
+                // impls (reflected via ReflectMap → ReflectElement, JSON via
+                // proto_map → ProtoElemJson). Keyed on the outer map field path,
+                // with the `map<bytes, bytes>` carve-out.
+                if let Some(entry) = crate::message::find_map_entry(msg, field) {
+                    let key_ty = crate::message::map_entry_key_type(ctx, entry, &msg_features);
+                    let val_ty = crate::message::map_entry_value_type(ctx, entry, &msg_features);
+                    if let crate::BytesRepr::Custom(path) =
+                        crate::impl_message::map_value_bytes_repr(
+                            ctx, key_ty, val_ty, &fqn, field_name,
+                        )
+                    {
+                        out.entry(path).or_insert(CustomElemKind::Bytes);
+                    }
+                    continue;
+                }
+
+                let field_features = crate::features::resolve_field(ctx, field, &msg_features);
+                let ty = crate::impl_message::effective_type(ctx, field, &field_features);
+                match ty {
+                    Type::TYPE_STRING => {
+                        if let crate::StringRepr::Custom(path) = ctx.string_repr(&field_fqn) {
+                            out.entry(path).or_insert(CustomElemKind::String);
+                        }
+                    }
+                    Type::TYPE_BYTES => {
+                        if let crate::BytesRepr::Custom(path) = ctx.bytes_repr(&field_fqn) {
+                            out.entry(path).or_insert(CustomElemKind::Bytes);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            walk(ctx, &msg.nested_type, &fqn, &msg_features, out);
+        }
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    for file_name in files_to_generate {
+        let Some(file) = file_descriptors
+            .iter()
+            .find(|f| f.name.as_deref() == Some(file_name.as_str()))
+        else {
+            continue;
+        };
+        let pkg = file.package.as_deref().unwrap_or("");
+        let file_features = crate::features::for_file(file);
+        walk(ctx, &file.message_type, pkg, &file_features, &mut out);
+    }
+    out
+}
+
+/// Render the deduped `ProtoElemJson` / `ReflectElement` impls for the collected
+/// custom element types (repeated elements and `map<K, bytes>` values). Each
+/// impl is feature-gated so a non-JSON /
+/// non-reflect build never references an absent trait. These compile only when
+/// the custom type is local to the generating crate (the orphan rule); that is
+/// the documented limitation of a custom `repeated` element under JSON or vtable
+/// reflection.
+fn render_custom_elem_impls(
+    ctx: &context::CodeGenContext,
+    elems: &std::collections::BTreeMap<String, CustomElemKind>,
+) -> Result<TokenStream, CodeGenError> {
+    let json_gate = ctx.config.feature_gates().json;
+    let reflect_gate = ctx.config.feature_gates().reflect;
+    let mut out = TokenStream::new();
+    for (path, kind) in elems {
+        let ty = parse_custom_type_path(path)?;
+        // `ProtoElemJson` is only needed for the `bytes` element path (proto3
+        // JSON base64). A repeated `string` element serializes through the
+        // native `Vec<T>` serde derive, and `map` string keys/values stay
+        // `String`, so a String-kind `ProtoElemJson` impl would be dead code.
+        if ctx.config.generate_json && *kind == CustomElemKind::Bytes {
+            out.extend(feature_gates::cfg_block(
+                quote! {
+                    impl ::buffa::json_helpers::ProtoElemJson for #ty {
+                        fn serialize_proto_json<S: ::serde::Serializer>(
+                            v: &Self,
+                            s: S,
+                        ) -> ::core::result::Result<S::Ok, S::Error> {
+                            ::buffa::json_helpers::bytes::serialize(
+                                ::core::convert::AsRef::<[u8]>::as_ref(v),
+                                s,
+                            )
+                        }
+                        fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+                            d: D,
+                        ) -> ::core::result::Result<Self, D::Error> {
+                            ::buffa::json_helpers::bytes::deserialize(d)
+                        }
+                    }
+                },
+                json_gate,
+            ));
+        }
+        if ctx.config.generate_reflection_vtable {
+            let value_ref = match kind {
+                CustomElemKind::String => quote! {
+                    ::buffa_descriptor::reflect::ValueRef::String(
+                        ::core::convert::AsRef::<str>::as_ref(self),
+                    )
+                },
+                CustomElemKind::Bytes => quote! {
+                    ::buffa_descriptor::reflect::ValueRef::Bytes(
+                        ::core::convert::AsRef::<[u8]>::as_ref(self),
+                    )
+                },
+            };
+            out.extend(feature_gates::cfg_block(
+                quote! {
+                    impl ::buffa_descriptor::reflect::ReflectElement for #ty {
+                        fn as_value_ref(&self) -> ::buffa_descriptor::reflect::ValueRef<'_> {
+                            #value_ref
+                        }
+                    }
+                },
+                reflect_gate,
+            ));
+        }
+    }
+    Ok(out)
+}
+
 pub fn generate_with_diagnostics(
     file_descriptors: &[FileDescriptorProto],
     files_to_generate: &[String],
@@ -1178,9 +1442,25 @@ pub fn generate_with_diagnostics(
         Vec::new()
     };
 
+    // Custom owned types used as elements of a `repeated` field need a
+    // `ProtoElemJson` (JSON) and/or `ReflectElement` (vtable) impl, which buffa
+    // cannot provide for a foreign type (orphan rule). Collect them once across
+    // the whole request, render the impls, and hand them to the first package so
+    // they are emitted exactly once (a per-package emit would collide, E0119).
+    let custom_elems = collect_custom_elements(&ctx, file_descriptors, files_to_generate);
+    let custom_elem_impls = render_custom_elem_impls(&ctx, &custom_elems)?;
+
+    let empty_impls = TokenStream::new();
     let mut output = Vec::new();
+    let mut custom_emitted = false;
     for (package, files) in by_package {
-        generate_package(&ctx, &package, &files, &fds_bytes, &mut output)?;
+        let impls = if custom_emitted {
+            &empty_impls
+        } else {
+            custom_emitted = true;
+            &custom_elem_impls
+        };
+        generate_package(&ctx, &package, &files, &fds_bytes, impls, &mut output)?;
     }
 
     Ok((output, ctx.take_warnings()))
@@ -1637,6 +1917,10 @@ fn generate_package(
     current_package: &str,
     files: &[&FileDescriptorProto],
     fds_bytes: &[u8],
+    // Deduped `ProtoElemJson` / `ReflectElement` impls for custom repeated
+    // element types, collected generation-wide and emitted into exactly one
+    // package's `__buffa` module (empty for every package but the first).
+    custom_elem_impls: &TokenStream,
     out: &mut Vec<GeneratedFile>,
 ) -> Result<(), CodeGenError> {
     // Registry paths are package-root-relative; `register_types` lives at
@@ -1769,7 +2053,14 @@ fn generate_package(
         },
         package: current_package.to_string(),
         kind: GeneratedFileKind::PackageMod,
-        content: generate_package_mod(ctx, &sections, &reg, &reexport_block, fds_bytes)?,
+        content: generate_package_mod(
+            ctx,
+            &sections,
+            &reg,
+            &reexport_block,
+            fds_bytes,
+            custom_elem_impls,
+        )?,
     });
 
     // Drop the import registry so its bindings can't leak into the next
@@ -1863,6 +2154,7 @@ fn generate_package_mod(
     reg: &message::RegistryPaths,
     root_reexports: &TokenStream,
     fds_bytes: &[u8],
+    custom_elem_impls: &TokenStream,
 ) -> Result<String, CodeGenError> {
     use crate::idents::make_field_ident;
 
@@ -2034,6 +2326,7 @@ fn generate_package_mod(
         && ext_mod.is_empty()
         && register_fn.is_empty()
         && reflect_mod.is_empty()
+        && custom_elem_impls.is_empty()
     {
         TokenStream::new()
     } else {
@@ -2049,6 +2342,7 @@ fn generate_package_mod(
                 #ext_mod
                 #register_fn
                 #reflect_mod
+                #custom_elem_impls
             }
         }
     };

@@ -955,43 +955,61 @@ fn vec_field_clear_stmt(field: &FieldDescriptorProto) -> Result<TokenStream, Cod
 ///
 /// Returns a `TokenStream` that clears the field to its default value while
 /// retaining heap allocations where possible (String, Vec, MessageField).
-/// Check if a bytes-typed field should use `bytes::Bytes` instead of `Vec<u8>`.
+/// Resolve the [`BytesRepr`](crate::BytesRepr) for a `bytes`-typed field.
 ///
-/// `proto_fqn` is the fully-qualified message name (no leading dot), e.g.
-/// `"my.pkg.Msg"`. Matched against `config.bytes_fields` as `".my.pkg.Msg.field"`.
-pub(crate) fn field_uses_bytes(ctx: &CodeGenContext, proto_fqn: &str, field_name: &str) -> bool {
+/// `proto_fqn` is the fully-qualified message name (no leading dot). Matched
+/// against `config.bytes_fields` as `".my.pkg.Msg.field"`. Returns
+/// [`BytesRepr::Vec`](crate::BytesRepr::Vec) for fields with no rule.
+pub(crate) fn field_bytes_repr(
+    ctx: &CodeGenContext,
+    proto_fqn: &str,
+    field_name: &str,
+) -> crate::BytesRepr {
     let field_fqn = format!(".{}.{}", proto_fqn, field_name);
-    ctx.use_bytes_type(&field_fqn)
+    ctx.bytes_repr(&field_fqn)
 }
 
-/// Whether a `map<K, bytes>` value field should use `bytes::Bytes` instead of
-/// `Vec<u8>`.
+/// The "replace" decode expression for a `bytes` field of the given
+/// representation: reads a length-delimited value and produces a fresh owned
+/// value (no in-place buffer reuse). `Vec<u8>` allocates, `bytes::Bytes`
+/// decodes zero-copy, and a custom type is constructed via `From<Vec<u8>>`.
+fn bytes_decode_expr(repr: &crate::BytesRepr) -> TokenStream {
+    match repr {
+        crate::BytesRepr::Vec => quote! { ::buffa::types::decode_bytes(buf)? },
+        crate::BytesRepr::Bytes => quote! { ::buffa::types::decode_bytes_to_bytes(buf)? },
+        crate::BytesRepr::Custom(_) => quote! { ::buffa::types::decode_bytes_to(buf)? },
+    }
+}
+
+/// Resolve the [`BytesRepr`](crate::BytesRepr) for a `map<K, bytes>` value.
 ///
-/// Single source of truth for the `bytes_fields` → map-value rule, shared by
+/// Single source of truth for the `bytes_type` → map-value rule, shared by
 /// `classify_field` (owned struct type, serde, and `arbitrary`), the binary and
-/// text `map_merge_arm` decoders, and `view::map_to_owned_expr`. Centralizing it
-/// keeps every site in agreement — a split decision would emit a `Bytes` value
-/// on one side and `Vec<u8>` on another, surfacing only as a compile error in
-/// the consuming crate.
+/// text map decoders, `view::map_to_owned_expr`, and the custom-element
+/// collector. Centralizing it keeps every site in agreement — a split decision
+/// would emit one representation on one side and another elsewhere, surfacing
+/// only as a compile error in the consuming crate.
 ///
 /// `key_ty` / `val_ty` are the **effective** map-entry types (see
-/// [`effective_type_in_map_entry`]); `None` means the entry lacks that field and
-/// is treated as non-`bytes`, so a non-map caller naturally yields `false`. The
-/// value becomes `Bytes` only when the value is proto `bytes`, the outer map
-/// field matches `bytes_fields`, and the key is *not* effective-`bytes`. The key
-/// carve-out tracks the one JSON helper (`bytes_key_bytes_val_map`) whose
-/// signature is the concrete `HashMap<Vec<u8>, Vec<u8>>`; when the key is
-/// effective-`bytes` the value must stay `Vec<u8>` to match it.
-pub(crate) fn map_value_use_bytes(
+/// [`effective_type_in_map_entry`]); `None` means the entry lacks that field, so
+/// a non-map caller naturally yields [`BytesRepr::Vec`](crate::BytesRepr::Vec).
+/// The value takes the matching rule only when the value is proto `bytes` and the
+/// key is *not* effective-`bytes` (the `map<bytes, bytes>` carve-out keeps
+/// `Vec<u8>` values, matching the concrete `bytes_key_bytes_val_map` JSON
+/// helper); otherwise it is `Vec`. The rule is keyed on the outer map field's
+/// path, like the singular path.
+pub(crate) fn map_value_bytes_repr(
     ctx: &CodeGenContext,
     key_ty: Option<Type>,
     val_ty: Option<Type>,
     proto_fqn: &str,
     field_name: &str,
-) -> bool {
-    val_ty == Some(Type::TYPE_BYTES)
-        && key_ty != Some(Type::TYPE_BYTES)
-        && field_uses_bytes(ctx, proto_fqn, field_name)
+) -> crate::BytesRepr {
+    if val_ty == Some(Type::TYPE_BYTES) && key_ty != Some(Type::TYPE_BYTES) {
+        field_bytes_repr(ctx, proto_fqn, field_name)
+    } else {
+        crate::BytesRepr::Vec
+    }
 }
 
 /// Resolve the [`StringRepr`](crate::StringRepr) for a `string`-typed field.
@@ -1023,7 +1041,7 @@ fn scalar_clear_stmt(
         .ok_or(CodeGenError::MissingField("field.name"))?;
     let ty = effective_type(ctx, field, features);
     let ident = make_field_ident(field_name);
-    let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, field_name);
+    let bytes_repr = field_bytes_repr(ctx, proto_fqn, field_name);
 
     // Explicit-presence fields (Option<T>): set to None.
     if is_explicit_presence_scalar(field, ty, features) {
@@ -1054,11 +1072,12 @@ fn scalar_clear_stmt(
             }
         }
         Type::TYPE_BYTES => {
-            // bytes::Bytes is immutable (no clear()), so reassign.
-            if use_bytes {
-                Ok(quote! { self.#ident = ::buffa::bytes::Bytes::new(); })
-            } else {
+            // Vec<u8> reuses its allocation via clear(); Bytes and custom types
+            // may be immutable, so reset to the default value instead.
+            if bytes_repr.is_default() {
                 Ok(quote! { self.#ident.clear(); })
+            } else {
+                Ok(quote! { self.#ident = ::core::default::Default::default(); })
             }
         }
         Type::TYPE_MESSAGE | Type::TYPE_GROUP => {
@@ -1611,7 +1630,7 @@ fn explicit_presence_merge_arm(
     ty: Type,
     features: &ResolvedFeatures,
     wire_check: &TokenStream,
-    use_bytes: bool,
+    bytes_repr: &crate::BytesRepr,
     string_repr: crate::StringRepr,
     preserve_unknown_fields: bool,
 ) -> TokenStream {
@@ -1634,18 +1653,7 @@ fn explicit_presence_merge_arm(
             }
         },
         Type::TYPE_BYTES => {
-            if use_bytes {
-                // bytes::Bytes is immutable — can't merge in place. Replace
-                // via decode_bytes_to_bytes (zero-copy if buf is Bytes-backed).
-                quote! {
-                    #field_number => {
-                        #wire_check
-                        self.#ident = ::core::option::Option::Some(
-                            ::buffa::types::decode_bytes_to_bytes(buf)?
-                        );
-                    }
-                }
-            } else {
+            if bytes_repr.is_default() {
                 quote! {
                     #field_number => {
                         #wire_check
@@ -1653,6 +1661,16 @@ fn explicit_presence_merge_arm(
                             self.#ident.get_or_insert_with(::buffa::alloc::vec::Vec::new),
                             buf,
                         )?;
+                    }
+                }
+            } else {
+                // Bytes and custom types are constructed fresh on decode; the
+                // in-place `merge_bytes` allocation reuse is `Vec<u8>`-only.
+                let decoded = bytes_decode_expr(bytes_repr);
+                quote! {
+                    #field_number => {
+                        #wire_check
+                        self.#ident = ::core::option::Option::Some(#decoded);
                     }
                 }
             }
@@ -1710,7 +1728,7 @@ fn scalar_merge_arm(
         .ok_or(CodeGenError::MissingField("field.name"))?;
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
-    let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, field_name);
+    let bytes_repr = field_bytes_repr(ctx, proto_fqn, field_name);
     let string_repr = field_string_repr(ctx, proto_fqn, field_name);
     let ident = make_field_ident(field_name);
     let wire_type = wire_type_token(ty);
@@ -1725,7 +1743,7 @@ fn scalar_merge_arm(
             ty,
             features,
             &wire_check,
-            use_bytes,
+            &bytes_repr,
             string_repr,
             preserve_unknown_fields,
         ));
@@ -1760,18 +1778,21 @@ fn scalar_merge_arm(
             });
         }
         Type::TYPE_BYTES => {
-            return Ok(if use_bytes {
-                quote! {
-                    #field_number => {
-                        #wire_check
-                        self.#ident = ::buffa::types::decode_bytes_to_bytes(buf)?;
-                    }
-                }
-            } else {
+            return Ok(if bytes_repr.is_default() {
                 quote! {
                     #field_number => {
                         #wire_check
                         ::buffa::types::merge_bytes(&mut self.#ident, buf)?;
+                    }
+                }
+            } else {
+                // Bytes and custom types are constructed fresh on decode; the
+                // in-place `merge_bytes` allocation reuse is `Vec<u8>`-only.
+                let decoded = bytes_decode_expr(&bytes_repr);
+                quote! {
+                    #field_number => {
+                        #wire_check
+                        self.#ident = #decoded;
                     }
                 }
             });
@@ -2106,7 +2127,7 @@ fn repeated_merge_arm(
         .ok_or(CodeGenError::MissingField("field.name"))?;
     let field_number = validated_field_number(field)?;
     let ty = effective_type(ctx, field, features);
-    let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, field_name);
+    let bytes_repr = field_bytes_repr(ctx, proto_fqn, field_name);
     let ident = make_field_ident(field_name);
 
     if ty == Type::TYPE_MESSAGE {
@@ -2147,13 +2168,7 @@ fn repeated_merge_arm(
                 quote! { ::buffa::types::decode_string(buf)? }
             }
             Type::TYPE_STRING => quote! { ::buffa::types::decode_string_to(buf)? },
-            Type::TYPE_BYTES => {
-                if use_bytes {
-                    quote! { ::buffa::types::decode_bytes_to_bytes(buf)? }
-                } else {
-                    quote! { ::buffa::types::decode_bytes(buf)? }
-                }
-            }
+            Type::TYPE_BYTES => bytes_decode_expr(&bytes_repr),
             // Message and group are handled by early returns above; the
             // remaining types satisfy `is_packed_type` and never reach this
             // unpacked branch. Enumerated so adding a `Type` variant is a
@@ -2416,7 +2431,7 @@ fn oneof_merge_arm(
     ty: Type,
     features: &ResolvedFeatures,
     preserve_unknown_fields: bool,
-    use_bytes: bool,
+    bytes_repr: &crate::BytesRepr,
     string_repr: crate::StringRepr,
     boxed: bool,
 ) -> TokenStream {
@@ -2452,11 +2467,7 @@ fn oneof_merge_arm(
             }
         }
         Type::TYPE_BYTES => {
-            let decoded = if use_bytes {
-                quote! { ::buffa::types::decode_bytes_to_bytes(buf)? }
-            } else {
-                quote! { ::buffa::types::decode_bytes(buf)? }
-            };
+            let decoded = bytes_decode_expr(bytes_repr);
             quote! {
                 #field_number => {
                     #wire_check
@@ -2587,7 +2598,7 @@ fn generate_oneof_impls(
             ty,
         ));
         let field_features = crate::features::resolve_field(ctx, field, features);
-        let use_bytes = ty == Type::TYPE_BYTES && field_uses_bytes(ctx, proto_fqn, field_name);
+        let bytes_repr = field_bytes_repr(ctx, proto_fqn, field_name);
         let string_repr = field_string_repr(ctx, proto_fqn, field_name);
         let boxed = crate::oneof::variant_boxed(
             ctx,
@@ -2602,7 +2613,7 @@ fn generate_oneof_impls(
             ty,
             &field_features,
             preserve_unknown_fields,
-            use_bytes,
+            &bytes_repr,
             string_repr,
             boxed,
         ));
@@ -2660,10 +2671,15 @@ pub(crate) fn find_map_entry_fields<'a>(
 ///
 /// Enum and message codecs use inference holes (`OpenEnum<_>`, `Msg<_>`): the
 /// map's own key/value Rust types pin the parameter, so no type-path
-/// resolution is needed here. `use_bytes` selects the `bytes::Bytes` value
-/// representation (the `bytes_fields` codegen option).
-fn map_codec_token(ty: Type, use_bytes: bool, features: &ResolvedFeatures) -> TokenStream {
-    match ty {
+/// resolution is needed here. For a `bytes` value, `bytes_repr` selects the
+/// codec: `Vec` → `BytesVec`, `Bytes` → `BytesBuf`, `Custom(path)` →
+/// `ProtoBytesMap<path>`.
+fn map_codec_token(
+    ty: Type,
+    bytes_repr: &crate::BytesRepr,
+    features: &ResolvedFeatures,
+) -> Result<TokenStream, CodeGenError> {
+    Ok(match ty {
         Type::TYPE_INT32 => quote! { ::buffa::map_codec::Int32 },
         Type::TYPE_INT64 => quote! { ::buffa::map_codec::Int64 },
         Type::TYPE_UINT32 => quote! { ::buffa::map_codec::Uint32 },
@@ -2678,8 +2694,14 @@ fn map_codec_token(ty: Type, use_bytes: bool, features: &ResolvedFeatures) -> To
         Type::TYPE_DOUBLE => quote! { ::buffa::map_codec::Double },
         Type::TYPE_BOOL => quote! { ::buffa::map_codec::Bool },
         Type::TYPE_STRING => quote! { ::buffa::map_codec::Str },
-        Type::TYPE_BYTES if use_bytes => quote! { ::buffa::map_codec::BytesBuf },
-        Type::TYPE_BYTES => quote! { ::buffa::map_codec::BytesVec },
+        Type::TYPE_BYTES => match bytes_repr {
+            crate::BytesRepr::Vec => quote! { ::buffa::map_codec::BytesVec },
+            crate::BytesRepr::Bytes => quote! { ::buffa::map_codec::BytesBuf },
+            crate::BytesRepr::Custom(path) => {
+                let ty = crate::parse_custom_type_path(path)?;
+                quote! { ::buffa::map_codec::ProtoBytesMap<#ty> }
+            }
+        },
         Type::TYPE_ENUM => {
             if is_closed_enum(features) {
                 quote! { ::buffa::map_codec::ClosedEnum<_> }
@@ -2689,7 +2711,7 @@ fn map_codec_token(ty: Type, use_bytes: bool, features: &ResolvedFeatures) -> To
         }
         Type::TYPE_MESSAGE => quote! { ::buffa::map_codec::Msg<_> },
         Type::TYPE_GROUP => unreachable!("map values cannot be groups"),
-    }
+    })
 }
 
 /// Resolved map-entry context shared by the three per-field map emitters.
@@ -2721,17 +2743,18 @@ fn map_entry_ctx(
     // referenced enum's declaration (not the parent message's).
     let key_features = crate::features::resolve_field(ctx, key_fd, features);
     let val_features = crate::features::resolve_field(ctx, val_fd, features);
-    // `bytes_fields` on `map<K, bytes>` → value encodes/decodes as `Bytes`
-    // (shared carve-out in `map_value_use_bytes`).
-    let value_use_bytes =
-        map_value_use_bytes(ctx, Some(key_ty), Some(val_ty), proto_fqn, field_name);
+    // `bytes_type` on `map<K, bytes>` → value encodes/decodes with the matching
+    // representation (Vec / Bytes / custom), via the shared carve-out in
+    // `map_value_bytes_repr`. Keys are always built-in, so they pass `Vec`.
+    let value_bytes_repr =
+        map_value_bytes_repr(ctx, Some(key_ty), Some(val_ty), proto_fqn, field_name);
     Ok(MapEntryCtx {
         field_number,
         ident: make_field_ident(field_name),
         outer_tag_len: tag_encoded_len(field_number, 2),
         val_ty,
-        key_codec: map_codec_token(key_ty, false, &key_features),
-        val_codec: map_codec_token(val_ty, value_use_bytes, &val_features),
+        key_codec: map_codec_token(key_ty, &crate::BytesRepr::Vec, &key_features)?,
+        val_codec: map_codec_token(val_ty, &value_bytes_repr, &val_features)?,
     })
 }
 

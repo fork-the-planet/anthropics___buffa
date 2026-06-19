@@ -1345,12 +1345,15 @@ fn custom_deser_oneof_group(
         } else {
             crate::StringRepr::String
         };
-        let variant_type = if field_type == Type::TYPE_BYTES
-            && crate::impl_message::field_uses_bytes(ctx, proto_fqn, proto_name)
-        {
-            quote! { ::buffa::bytes::Bytes }
+        let variant_bytes_repr = if field_type == Type::TYPE_BYTES {
+            crate::impl_message::field_bytes_repr(ctx, proto_fqn, proto_name)
+        } else {
+            crate::BytesRepr::Vec
+        };
+        let variant_type = if field_type == Type::TYPE_BYTES && !variant_bytes_repr.is_default() {
+            variant_bytes_repr.type_path(resolver, ctx, nesting)?
         } else if field_type == Type::TYPE_STRING && !variant_string_repr.is_default() {
-            variant_string_repr.type_path(resolver, ctx, nesting)
+            variant_string_repr.type_path(resolver, ctx, nesting)?
         } else {
             scalar_or_message_type_nested(ctx, field, current_package, nesting, features, resolver)?
         };
@@ -1411,14 +1414,16 @@ struct FieldInfo {
     /// scalars. Not true for message fields (which use `MessageField<T>`),
     /// repeated fields, or proto2 `required` fields.
     is_optional: bool,
-    /// True when the field is proto type `bytes` AND matches the `bytes_fields`
-    /// config — i.e. the struct field type is `bytes::Bytes` not `Vec<u8>`.
-    use_bytes: bool,
-    /// True when the field is `map<K, bytes>` AND the outer map field matches
-    /// the `bytes_fields` config — i.e. the map value type is `bytes::Bytes`
-    /// not `Vec<u8>`. Mutually exclusive with `use_bytes` (a map field's outer
-    /// type is `MESSAGE`, not `BYTES`).
-    map_value_use_bytes: bool,
+    /// The owned Rust type used for this field when it is proto type `bytes`
+    /// (singular, optional, or repeated; map values use `map_value_bytes_repr`).
+    /// [`BytesRepr::Vec`] for non-bytes fields and for bytes fields with no
+    /// matching `bytes_fields` rule.
+    bytes_repr: crate::BytesRepr,
+    /// The owned Rust representation for a `map<K, bytes>` value (`Vec` / `Bytes`
+    /// / custom), resolved by `map_value_bytes_repr` (with the `map<bytes,bytes>`
+    /// carve-out). [`BytesRepr::Vec`] when the field is not a `map<_, bytes>` or
+    /// has no matching rule.
+    map_value_bytes_repr: crate::BytesRepr,
     /// The owned Rust type used for this field when it is proto type `string`
     /// (singular, optional, or repeated; map keys/values are unaffected).
     /// [`StringRepr::String`] for non-string fields and for string fields with
@@ -1472,18 +1477,22 @@ fn classify_field(
     let is_optional = is_explicit_presence_scalar(field, field_type, features);
     let is_required = crate::impl_message::is_required_field(field, features);
 
-    // Check if this bytes field should use bytes::Bytes.
+    // Resolve the configurable owned representation for this `bytes` field.
     let field_name = field.name.as_deref().unwrap_or("");
     let field_fqn = format!(".{}.{}", proto_fqn, field_name);
-    let use_bytes = field_type == Type::TYPE_BYTES && ctx.use_bytes_type(&field_fqn);
+    let bytes_repr = if field_type == Type::TYPE_BYTES {
+        ctx.bytes_repr(&field_fqn)
+    } else {
+        crate::BytesRepr::Vec
+    };
 
     // For `map<K, bytes>`, the outer field type is MESSAGE (synthetic entry),
-    // so `use_bytes` is false; the value type is decided by the shared
-    // `map_value_use_bytes` predicate (also used by the binary/text decoders and
-    // the view→owned conversion, so all sites stay in agreement). The bytes-key
+    // so `bytes_repr` is `Vec`; the value representation is decided by the shared
+    // `map_value_bytes_repr` (also used by the binary/text decoders and the
+    // view→owned conversion, so all sites stay in agreement). The bytes-key
     // carve-out is documented there.
-    let map_value_use_bytes = map_entry.is_some_and(|e| {
-        crate::impl_message::map_value_use_bytes(
+    let map_value_bytes_repr = map_entry.map_or(crate::BytesRepr::Vec, |e| {
+        crate::impl_message::map_value_bytes_repr(
             ctx,
             map_entry_key_type(ctx, e, features),
             map_entry_value_type(ctx, e, features),
@@ -1496,14 +1505,7 @@ fn classify_field(
     // computing these eagerly for non-bytes/non-string fields would record
     // `Vec`/`String` requests with no use site — and the emitted `use`
     // block would trip `unused_imports` in the consumer crate.
-    let bytes_type = || {
-        if use_bytes {
-            quote! { ::buffa::bytes::Bytes }
-        } else {
-            let vec = resolver.vec_at(ctx, nesting);
-            quote! { #vec<u8> }
-        }
-    };
+    let bytes_type = || bytes_repr.type_path(resolver, ctx, nesting);
 
     // Configurable owned representation for `string` fields (default `String`).
     // Map keys/values are unaffected — they always use `String`. (The bytes
@@ -1518,12 +1520,12 @@ fn classify_field(
 
     let mut inner_opt_type: Option<TokenStream> = None;
     let rust_type = if let Some(entry) = map_entry {
-        map_rust_type_from_entry(scope, entry, map_value_use_bytes, resolver)?
+        map_rust_type_from_entry(scope, entry, &map_value_bytes_repr, resolver)?
     } else if is_repeated {
         let elem = if field_type == Type::TYPE_BYTES {
-            bytes_type()
+            bytes_type()?
         } else if field_type == Type::TYPE_STRING {
-            string_type()
+            string_type()?
         } else {
             scalar_or_message_type_nested(ctx, field, current_package, nesting, features, resolver)?
         };
@@ -1541,9 +1543,9 @@ fn classify_field(
         let inner = if field_type == Type::TYPE_ENUM {
             resolve_enum_type(scope, field, resolver)?
         } else if field_type == Type::TYPE_BYTES {
-            bytes_type()
+            bytes_type()?
         } else if field_type == Type::TYPE_STRING {
-            string_type()
+            string_type()?
         } else {
             scalar_rust_type(field_type, resolver, ctx, nesting)?
         };
@@ -1555,9 +1557,9 @@ fn classify_field(
     } else if field_type == Type::TYPE_ENUM {
         resolve_enum_type(scope, field, resolver)?
     } else if field_type == Type::TYPE_BYTES {
-        bytes_type()
+        bytes_type()?
     } else if field_type == Type::TYPE_STRING {
-        string_type()
+        string_type()?
     } else {
         scalar_rust_type(field_type, resolver, ctx, nesting)?
     };
@@ -1608,8 +1610,8 @@ fn classify_field(
         is_map,
         is_optional,
         is_required,
-        use_bytes,
-        map_value_use_bytes,
+        bytes_repr,
+        map_value_bytes_repr,
         string_repr,
         map_key_type,
         map_value_type,
@@ -1690,32 +1692,36 @@ fn generate_field(
     };
     let custom_field_attrs =
         CodeGenContext::matching_attributes(&ctx.config.field_attributes, &field_fqn)?;
-    let arbitrary_field_attr = if ctx.config.generate_arbitrary && info.use_bytes && !info.is_map {
-        let helper = if info.is_optional {
-            quote! { ::buffa::__private::arbitrary_bytes_opt }
-        } else if info.is_repeated {
-            quote! { ::buffa::__private::arbitrary_bytes_vec }
-        } else {
-            quote! { ::buffa::__private::arbitrary_bytes }
-        };
-        quote! { #[cfg_attr(feature = "arbitrary", arbitrary(with = #helper))] }
-    } else if ctx.config.generate_arbitrary && info.map_value_use_bytes {
-        // `HashMap<K, Bytes>` has no native `Arbitrary` impl (`Bytes` lacks
-        // one); generate a per-key-type shim that builds `HashMap<K, Vec<u8>>`
-        // first and maps values to `Bytes`. Wire-equivalent.
-        quote! { #[cfg_attr(feature = "arbitrary", arbitrary(with = ::buffa::__private::arbitrary_bytes_map))] }
-    } else if ctx.config.generate_arbitrary
-        && info.string_repr == crate::StringRepr::EcoString
+    // Non-default `string`/`bytes` representations attach a type-agnostic
+    // `Arbitrary` builder, selected by field *kind* (string vs bytes, singular
+    // vs optional vs repeated) rather than by concrete type. The builder
+    // materializes the canonical `String`/`Vec<u8>` and converts via `From`, so
+    // a substituted type needs no native `Arbitrary` impl. The default
+    // `String`/`Vec<u8>` representations keep their native derive (no attr).
+    let arbitrary_field_attr = if ctx.config.generate_arbitrary
+        && !info.bytes_repr.is_default()
         && !info.is_map
     {
-        // `ecow::EcoString` has no native `Arbitrary` impl; smol_str and
-        // compact_str do, so only EcoString needs the shim.
         let helper = if info.is_optional {
-            quote! { ::buffa::__private::arbitrary_ecow_opt }
+            quote! { ::buffa::__private::arbitrary_proto_bytes_opt }
         } else if info.is_repeated {
-            quote! { ::buffa::__private::arbitrary_ecow_vec }
+            quote! { ::buffa::__private::arbitrary_proto_bytes_vec }
         } else {
-            quote! { ::buffa::__private::arbitrary_ecow }
+            quote! { ::buffa::__private::arbitrary_proto_bytes }
+        };
+        quote! { #[cfg_attr(feature = "arbitrary", arbitrary(with = #helper))] }
+    } else if ctx.config.generate_arbitrary && !info.map_value_bytes_repr.is_default() {
+        // A non-default `map<K, bytes>` value (`Bytes` or a custom type) needs
+        // the generic shim: it builds `HashMap<K, Vec<u8>>` first and maps values
+        // through `From`, so the value type needs no native `Arbitrary` impl.
+        quote! { #[cfg_attr(feature = "arbitrary", arbitrary(with = ::buffa::__private::arbitrary_proto_bytes_map))] }
+    } else if ctx.config.generate_arbitrary && !info.string_repr.is_default() && !info.is_map {
+        let helper = if info.is_optional {
+            quote! { ::buffa::__private::arbitrary_proto_string_opt }
+        } else if info.is_repeated {
+            quote! { ::buffa::__private::arbitrary_proto_string_vec }
+        } else {
+            quote! { ::buffa::__private::arbitrary_proto_string }
         };
         quote! { #[cfg_attr(feature = "arbitrary", arbitrary(with = #helper))] }
     } else {
@@ -1816,7 +1822,7 @@ pub(crate) fn find_map_entry<'a>(
 }
 
 /// Return the effective proto `Type` of a map entry's key field.
-fn map_entry_key_type(
+pub(crate) fn map_entry_key_type(
     ctx: &CodeGenContext,
     entry: &DescriptorProto,
     features: &ResolvedFeatures,
@@ -1828,7 +1834,7 @@ fn map_entry_key_type(
 }
 
 /// Return the effective proto `Type` of a map entry's value field.
-fn map_entry_value_type(
+pub(crate) fn map_entry_value_type(
     ctx: &CodeGenContext,
     entry: &DescriptorProto,
     features: &ResolvedFeatures,
@@ -1849,7 +1855,7 @@ fn map_entry_value_type(
 fn map_rust_type_from_entry(
     scope: MessageScope<'_>,
     entry: &DescriptorProto,
-    value_use_bytes: bool,
+    value_bytes_repr: &crate::BytesRepr,
     resolver: &crate::imports::ImportResolver,
 ) -> Result<TokenStream, CodeGenError> {
     let MessageScope {
@@ -1878,11 +1884,13 @@ fn map_rust_type_from_entry(
         features,
         resolver,
     )?;
-    let value_type = if value_use_bytes
-        && crate::impl_message::effective_type_in_map_entry(ctx, value_field, features)
-            == Type::TYPE_BYTES
+    let value_type = if crate::impl_message::effective_type_in_map_entry(ctx, value_field, features)
+        == Type::TYPE_BYTES
+        && !value_bytes_repr.is_default()
     {
-        quote! { ::buffa::bytes::Bytes }
+        // Custom / Bytes map-value representation (Vec<u8> falls through to the
+        // default scalar path below).
+        value_bytes_repr.type_path(resolver, ctx, nesting)?
     } else {
         scalar_or_message_type_nested(
             ctx,

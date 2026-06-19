@@ -58,9 +58,9 @@ checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
 name = "borsh"
-version = "1.6.1"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd1e3f8955a5d7de9fab72fc8373fade9fb8a703968cb200ae3dc6cf08e185a"
+checksum = "2f3f6da4992df95bbcd9af42a6c7dcb994498fc9048230405f3b36ff7cd3f145"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -73,13 +73,10 @@ dependencies = [
  "arbitrary",
  "base64",
  "bytes",
- "compact_str",
- "ecow",
  "hashbrown 0.15.5",
  "once_cell",
  "serde",
  "serde_json",
- "smol_str",
  "thiserror",
 ]
 
@@ -117,6 +114,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "buffa-smolstr"
+version = "0.7.1"
+dependencies = [
+ "buffa",
+ "serde",
+ "smol_str",
+]
+
+[[package]]
 name = "buffa-test"
 version = "0.7.1"
 dependencies = [
@@ -124,8 +130,11 @@ dependencies = [
  "buffa",
  "buffa-build",
  "buffa-descriptor",
+ "buffa-smolstr",
  "buffa-types",
  "bytes",
+ "compact_str",
+ "ecow",
  "serde",
  "serde_json",
 ]
@@ -263,7 +272,6 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a"
 dependencies = [
- "arbitrary",
  "castaway",
  "cfg-if",
  "itoa",
@@ -780,7 +788,6 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
 dependencies = [
- "arbitrary",
  "borsh",
  "serde",
 ]

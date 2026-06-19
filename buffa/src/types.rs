@@ -576,6 +576,96 @@ pub fn merge_string(value: &mut String, buf: &mut impl Buf) -> Result<(), Decode
     Ok(())
 }
 
+/// The raw, length-delimited payload of a `string` or `bytes` field, handed to
+/// [`ProtoString::from_wire`] / [`ProtoBytes::from_wire`] so a representation can
+/// construct itself directly from the wire — validating (or skipping validation)
+/// and choosing borrow-vs-own on its own terms.
+///
+/// The decoder hands over `Borrowed` when the field's bytes are contiguous in
+/// the current input chunk (the common case for slice- and `Bytes`-backed
+/// sources) and `Owned` only otherwise (e.g. a field straddling a `Chain`
+/// boundary). A representation reads the bytes with [`as_slice`](Self::as_slice)
+/// (always zero-copy) or takes ownership with [`into_bytes`](Self::into_bytes)
+/// (zero-copy only for an `Owned` payload — see that method).
+#[derive(Debug, Clone)]
+pub enum WirePayload<'a> {
+    /// The field's bytes borrowed directly from the input buffer.
+    Borrowed(&'a [u8]),
+    /// The field's bytes owned as `Bytes` (reference-counted). Produced today
+    /// only for multi-chunk sources; a single-chunk source — including a single
+    /// `Bytes` buffer — currently arrives as `Borrowed`.
+    Owned(Bytes),
+}
+
+impl WirePayload<'_> {
+    /// Borrow the field's bytes (zero-copy in both variants).
+    #[inline]
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            WirePayload::Borrowed(s) => s,
+            WirePayload::Owned(b) => b,
+        }
+    }
+
+    /// Take ownership of the field's bytes as [`Bytes`].
+    ///
+    /// Zero-copy only for an `Owned` payload, which today is produced only for
+    /// multi-chunk sources — a single-chunk source (including a single `Bytes`
+    /// buffer) arrives as `Borrowed` and is copied here. For a guaranteed
+    /// zero-copy `bytes` field path use the built-in `bytes::Bytes` representation
+    /// ([`decode_bytes_to_bytes`]); single-chunk-`Bytes` zero-copy for custom
+    /// types is a planned additive enhancement.
+    #[inline]
+    #[must_use]
+    pub fn into_bytes(self) -> Bytes {
+        match self {
+            WirePayload::Borrowed(s) => Bytes::copy_from_slice(s),
+            WirePayload::Owned(b) => b,
+        }
+    }
+}
+
+/// Read one length-delimited field payload from `buf` and pass it to `f` as a
+/// [`WirePayload`], advancing `buf` past the field.
+///
+/// The payload is `Borrowed` when the whole field is contiguous in the current
+/// chunk (zero-copy), and `Owned` (via [`Buf::copy_to_bytes`], itself zero-copy
+/// for a `Bytes`-backed `buf`) when it is not. `f` produces an owned value, so
+/// the borrow never escapes and `buf` can be advanced afterwards.
+///
+/// # Errors
+///
+/// - [`DecodeError::UnexpectedEof`] if the buffer is shorter than the declared
+///   length.
+/// - [`DecodeError::MessageTooLarge`] if the declared length overflows `usize`.
+/// - Any error returned by `f` (e.g. [`DecodeError::InvalidUtf8`]).
+///
+/// On any error the `buf` cursor position is unspecified: a decode error aborts
+/// the whole decode, so the buffer is not left in a recoverable state.
+#[inline]
+pub(crate) fn read_field_payload<R>(
+    buf: &mut impl Buf,
+    f: impl FnOnce(WirePayload<'_>) -> Result<R, DecodeError>,
+) -> Result<R, DecodeError> {
+    let len = decode_varint(buf)?;
+    let len = usize::try_from(len).map_err(|_| DecodeError::MessageTooLarge)?;
+    if buf.remaining() < len {
+        return Err(DecodeError::UnexpectedEof);
+    }
+    let chunk = buf.chunk();
+    if chunk.len() >= len {
+        // Whole field is contiguous: hand over a borrowed slice (zero-copy).
+        let r = f(WirePayload::Borrowed(&chunk[..len]))?;
+        buf.advance(len);
+        Ok(r)
+    } else {
+        // Field straddles chunk boundaries: take an owned `Bytes` (zero-copy
+        // when `buf` is `Bytes`-backed, a copy otherwise).
+        f(WirePayload::Owned(buf.copy_to_bytes(len)))
+    }
+}
+
 /// Compute the encoded byte count of a `string` value (varint length prefix +
 /// UTF-8 byte count), excluding the field tag.
 #[inline]
@@ -585,33 +675,68 @@ pub fn string_encoded_len(value: &str) -> usize {
 }
 
 /// The bound generated code places on the Rust type used for a proto `string`
-/// field. You neither implement nor name this trait by hand — a blanket impl
-/// covers every conforming type, and a forthcoming `string_type` knob in
-/// `buffa_build` selects the concrete type at code-generation time.
+/// field.
 ///
-/// buffa generates [`String`] by default. The knob will be able to substitute a
-/// small-string-optimized type — such as `smol_str::SmolStr`,
-/// `ecow::EcoString`, or `compact_str::CompactString` (each behind the matching
-/// `buffa` feature) — for read-mostly schemas where `String`'s growable buffer
-/// is unnecessary.
+/// buffa implements it for the default [`String`]. Select another representation
+/// with `buffa_build`'s `string_type` / `string_type_custom`. There is
+/// intentionally **no blanket impl**, and a foreign type cannot implement this
+/// trait (orphan rule) — wrap it in a local newtype that implements the trait;
+/// see the `buffa-smolstr` crate for the canonical template.
 ///
 /// The bounds are exactly what generated code requires of a string field:
 ///
+/// - `from_wire` (the required method, below) — the binary decode constructor.
 /// - `Clone + PartialEq + Default + Debug` — for the `#[derive(...)]` and the
 ///   hand-written `Debug` impl on message structs, and for `clear()` (which
 ///   resets the field to [`Default`] rather than relying on a `String`-specific
-///   `clear`, since the small-string types may be immutable).
+///   `clear`, since a substituted type may be immutable).
 /// - `Send + Sync` — so a message owning such a field stays `Send + Sync`;
 ///   without this bound an exotic string type could silently make every
 ///   containing message thread-unsafe.
-/// - [`AsRef<str>`] — the encoder borrows the field as `&str`;
-///   [`encode_string`] and [`string_encoded_len`] take `&str`.
-/// - `From<String>` and `From<&str>` — used by the decode path
-///   ([`decode_string_to`]) and (once the knob lands) the view→owned conversion
-///   to construct the field from freshly decoded text.
+/// - `Deref<Target = str>` and [`AsRef<str>`] — generated code borrows the field
+///   as `&str` by plain reference coercion (`&self.field` where
+///   [`encode_string`] / [`string_encoded_len`] expect `&str`), so the
+///   representation must `Deref` to `str`; `AsRef<str>` is also required for the
+///   call sites that ask for it explicitly.
+/// - `From<String>` and `From<&str>` — used by the JSON, text-format, and
+///   view→owned paths to construct the field from freshly decoded text (binary
+///   decode uses [`from_wire`](ProtoString::from_wire) instead).
 ///
 /// For the default `String` representation every conversion is the identity, so
 /// the generic path costs nothing relative to the specialized one.
+///
+/// # Contract
+///
+/// The bounds are structural and cannot capture these invariants; an
+/// implementation must uphold them:
+///
+/// - `Default` is the empty string — generated `clear()` resets to
+///   `Default::default()` and implicit-presence encoding skips empty values, so
+///   a non-empty `Default` silently drops or corrupts cleared fields.
+/// - `Deref`, `AsRef`, and the constructors observe the same content — encoding
+///   borrows via `Deref` / `AsRef` and the view / reflect paths read the same
+///   way; if they disagree, a value encodes differently than it reads back.
+/// - `from_wire` is value-equivalent to `From<String>` / `From<&str>` — binary
+///   decode uses `from_wire` while JSON / text / view→owned use `From`, so a
+///   representation must not transform the text (e.g. case-fold) in one path but
+///   not the other.
+///
+/// # Limitations
+///
+/// - **`repeated` elements must be crate-local.** A custom type used as the
+///   element of a `repeated` field needs a codegen-emitted `ReflectElement`
+///   impl (for vtable reflection), which the orphan rule permits only when the
+///   type is local to the generating crate. A *foreign* custom type in that
+///   position fails to compile — wrap it in a crate-local newtype. Singular,
+///   optional, oneof, and map uses work with a foreign type directly.
+/// - **JSON of a `repeated` custom string** serializes through the element's
+///   native `serde`, so a custom string used as a `repeated` element under JSON
+///   must derive `Serialize` / `Deserialize` (and, for an external type, enable
+///   its `serde` feature). Singular / optional / oneof custom strings use the
+///   `proto_string` with-module and need no `serde` impl.
+/// - **No `Arbitrary` impl required.** Under the `arbitrary` feature codegen
+///   attaches a generic builder, so a custom type needs no native
+///   `arbitrary::Arbitrary` impl.
 pub trait ProtoString:
     Clone
     + PartialEq
@@ -619,23 +744,36 @@ pub trait ProtoString:
     + core::fmt::Debug
     + Send
     + Sync
+    + core::ops::Deref<Target = str>
     + AsRef<str>
     + From<String>
     + for<'a> From<&'a str>
 {
+    /// Construct the representation from a decoded `string` field's wire payload.
+    ///
+    /// This is the decode constructor: it owns the validation/ownership choice,
+    /// so a representation can borrow-and-inline a short string (no transient
+    /// heap allocation) or validate UTF-8 only when it must. There is
+    /// intentionally no blanket impl — every representation provides its own
+    /// optimal `from_wire`; the `From<String>`/`From<&str>` supertraits remain
+    /// for the JSON, text, and view→owned paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::InvalidUtf8`] if the payload is not valid UTF-8. A
+    /// representation that enforces additional invariants can reject the value
+    /// with [`DecodeError::Custom`] (carrying a static reason), or return any
+    /// other [`DecodeError`] variant.
+    fn from_wire(payload: WirePayload<'_>) -> Result<Self, DecodeError>;
 }
 
-impl<T> ProtoString for T where
-    T: Clone
-        + PartialEq
-        + Default
-        + core::fmt::Debug
-        + Send
-        + Sync
-        + AsRef<str>
-        + From<String>
-        + for<'a> From<&'a str>
-{
+impl ProtoString for String {
+    #[inline]
+    fn from_wire(payload: WirePayload<'_>) -> Result<Self, DecodeError> {
+        core::str::from_utf8(payload.as_slice())
+            .map(alloc::borrow::ToOwned::to_owned)
+            .map_err(|_| DecodeError::InvalidUtf8)
+    }
 }
 
 // The default representation must always satisfy the bound; freeze that
@@ -645,24 +783,25 @@ const _: fn() = || {
     assert_proto_string::<String>();
 };
 
-/// Decode a length-delimited `string` into a configurable [`ProtoString`] type.
+/// Decode a length-delimited `string` into a configurable [`ProtoString`] type
+/// by handing its wire payload to [`ProtoString::from_wire`].
 ///
-/// This is the generic counterpart to [`decode_string`]: it reads the varint
-/// length prefix, copies that many bytes, and validates UTF-8 identically, then
-/// constructs the target representation via `From<String>`. Generated code uses
-/// the in-place [`merge_string`] for `String` fields (which reuses the existing
-/// allocation) and this helper for every other [`ProtoString`] type.
+/// The representation's `from_wire` decides validation and borrow-vs-own, so an
+/// inline-capable type avoids the transient `String` allocation that a
+/// `From<String>` path would force. Generated code uses the in-place
+/// [`merge_string`] for default `String` fields (allocation reuse) and this
+/// helper for every other [`ProtoString`] type.
 ///
 /// # Errors
 ///
-/// Propagates the same errors as [`decode_string`]:
 /// - [`DecodeError::UnexpectedEof`] if the buffer is shorter than the declared
 ///   length.
 /// - [`DecodeError::MessageTooLarge`] if the declared length overflows `usize`.
-/// - [`DecodeError::InvalidUtf8`] if the bytes are not valid UTF-8.
+/// - [`DecodeError::InvalidUtf8`] (or another error) as returned by the
+///   representation's [`from_wire`](ProtoString::from_wire).
 #[inline]
 pub fn decode_string_to<S: ProtoString>(buf: &mut impl Buf) -> Result<S, DecodeError> {
-    decode_string(buf).map(S::from)
+    read_field_payload(buf, S::from_wire)
 }
 
 /// Encode a `bytes` value as a varint length prefix followed by raw bytes
@@ -731,6 +870,152 @@ pub fn decode_bytes_to_bytes(buf: &mut impl Buf) -> Result<Bytes, DecodeError> {
         return Err(DecodeError::UnexpectedEof);
     }
     Ok(buf.copy_to_bytes(len))
+}
+
+/// The bound generated code places on the Rust type used for a proto `bytes`
+/// field.
+///
+/// buffa implements it for the default [`Vec<u8>`] and for
+/// [`bytes::Bytes`](crate::bytes::Bytes) (which decodes zero-copy from a
+/// `Bytes`-backed buffer). Select another representation with `buffa_build`'s
+/// `bytes_type` / `bytes_type_custom`. There is intentionally **no blanket
+/// impl**, and a foreign type cannot implement this trait (orphan rule) — wrap
+/// it in a local newtype that implements the trait; see the `buffa-smolstr`
+/// crate for the canonical template (the `bytes` side mirrors it).
+///
+/// This is the `bytes`-side twin of [`ProtoString`]; the bounds are exactly what
+/// generated code requires of a `bytes` field:
+///
+/// - `from_wire` (the required method, below) — the binary decode constructor.
+/// - `Clone + PartialEq + Default + Debug` — for the `#[derive(...)]` and the
+///   hand-written `Debug` impl on message structs, and for `clear()` (which
+///   resets the field to [`Default`] rather than relying on a `Vec`-specific
+///   `clear`, since a substituted type may be immutable).
+/// - `Send + Sync` — so a message owning such a field stays `Send + Sync`.
+/// - `Deref<Target = [u8]>` and [`AsRef<[u8]>`](AsRef) — generated code borrows
+///   the field as `&[u8]` by plain reference coercion (`&self.field` where
+///   [`encode_bytes`] / [`bytes_encoded_len`] expect `&[u8]`), so the
+///   representation must `Deref` to `[u8]`; `AsRef<[u8]>` is also required for
+///   the call sites that ask for it explicitly.
+/// - `From<Vec<u8>>` — used by the JSON and view→owned paths to construct the
+///   field from freshly decoded bytes (binary decode uses
+///   [`from_wire`](ProtoBytes::from_wire) instead). Note that `From<&[u8]>` is
+///   deliberately *not* required: `bytes::Bytes` implements it only for
+///   `&'static [u8]`, so requiring it would exclude `Bytes` itself.
+///
+/// For the default `Vec<u8>` representation every conversion is the identity, so
+/// the generic path costs nothing relative to the specialized one.
+///
+/// # Contract
+///
+/// The bounds are structural and cannot capture these invariants; an
+/// implementation must uphold them:
+///
+/// - `Default` is the empty value — generated `clear()` resets to
+///   `Default::default()` and implicit-presence encoding skips empty values, so
+///   a non-empty `Default` silently drops or corrupts cleared fields.
+/// - `Deref`, `AsRef`, and the constructors observe the same content — encoding
+///   borrows via `Deref` / `AsRef` and the view / reflect paths read the same
+///   way; if they disagree, a value encodes differently than it reads back.
+/// - `from_wire` is value-equivalent to `From<Vec<u8>>` — binary decode uses
+///   `from_wire` while JSON / view→owned use `From`, so a representation must not
+///   transform the bytes in one path but not the other.
+///
+/// # Limitations
+///
+/// - **`repeated` elements and `map<K, bytes>` values must be crate-local.** A
+///   custom type used as the element of a `repeated` field — or as a
+///   `map<K, bytes>` value — needs codegen-emitted `ReflectElement` (vtable) and
+///   base64 `ProtoElemJson` (JSON) impls, which the orphan rule permits only when
+///   the type is local to the generating crate. A *foreign* custom type in that
+///   position fails to compile — wrap it in a crate-local newtype. Singular,
+///   optional, and oneof uses work with a foreign type directly. (A custom
+///   `bytes` map value is honored just like the built-in `bytes::Bytes`; only the
+///   `map<bytes, bytes>` carve-out keeps `Vec<u8>` values.)
+/// - **No `Arbitrary` impl required.** Under the `arbitrary` feature codegen
+///   attaches a generic builder, so a custom type needs no native
+///   `arbitrary::Arbitrary` impl.
+pub trait ProtoBytes:
+    Clone
+    + PartialEq
+    + Default
+    + core::fmt::Debug
+    + Send
+    + Sync
+    + core::ops::Deref<Target = [u8]>
+    + AsRef<[u8]>
+    + From<Vec<u8>>
+{
+    /// Construct the representation from a decoded `bytes` field's wire payload.
+    ///
+    /// This is the decode constructor: it owns the borrow-vs-own choice. A
+    /// `Bytes`-backed representation takes ownership via
+    /// [`WirePayload::into_bytes`], which is zero-copy only for an `Owned`
+    /// payload — today produced only for multi-chunk sources, so a single-chunk
+    /// source (including a single `Bytes` buffer) currently yields `Borrowed`
+    /// and copies. For a guaranteed zero-copy `bytes` field use the built-in
+    /// `bytes::Bytes` representation; single-chunk-`Bytes` zero-copy share for
+    /// custom types is a planned additive enhancement. There is intentionally no
+    /// blanket impl; the `From<Vec<u8>>` supertrait remains for the JSON and
+    /// view→owned paths.
+    ///
+    /// # Errors
+    ///
+    /// The built-in representations are infallible. A representation that
+    /// enforces additional invariants (e.g. a fixed length) can reject the
+    /// value with [`DecodeError::Custom`] (carrying a static reason), or return
+    /// any other [`DecodeError`] variant.
+    fn from_wire(payload: WirePayload<'_>) -> Result<Self, DecodeError>;
+}
+
+impl ProtoBytes for Vec<u8> {
+    #[inline]
+    fn from_wire(payload: WirePayload<'_>) -> Result<Self, DecodeError> {
+        Ok(payload.as_slice().to_vec())
+    }
+}
+
+impl ProtoBytes for Bytes {
+    #[inline]
+    fn from_wire(payload: WirePayload<'_>) -> Result<Self, DecodeError> {
+        // Zero-copy for an `Owned` payload (multi-chunk sources today); a
+        // single-chunk source arrives `Borrowed` and is copied. The default
+        // `bytes::Bytes` field path uses `decode_bytes_to_bytes` for guaranteed
+        // zero-copy from a `Bytes`-backed buffer.
+        Ok(payload.into_bytes())
+    }
+}
+
+// The two built-in representations must always satisfy the bound; freeze that
+// invariant against future changes to the trait's supertraits.
+const _: fn() = || {
+    fn assert_proto_bytes<B: ProtoBytes>() {}
+    assert_proto_bytes::<Vec<u8>>();
+    assert_proto_bytes::<Bytes>();
+};
+
+/// Decode a length-delimited `bytes` value into a configurable [`ProtoBytes`]
+/// type.
+///
+/// This is the generic counterpart to [`decode_bytes`]: it hands the field's
+/// wire payload to [`ProtoBytes::from_wire`]. A `Bytes`-backed representation can
+/// take ownership zero-copy only for an `Owned` payload (multi-chunk sources
+/// today); for guaranteed zero-copy from a single `Bytes` buffer, the default
+/// `bytes::Bytes` field path uses [`decode_bytes_to_bytes`] instead. Generated
+/// code uses the in-place [`merge_bytes`] for default `Vec<u8>` fields
+/// (allocation reuse) and this helper for every other [`ProtoBytes`] type
+/// (including `bytes::Bytes`).
+///
+/// # Errors
+///
+/// - [`DecodeError::UnexpectedEof`] if the buffer is shorter than the declared
+///   length.
+/// - [`DecodeError::MessageTooLarge`] if the declared length overflows `usize`.
+/// - Any error returned by the representation's
+///   [`from_wire`](ProtoBytes::from_wire).
+#[inline]
+pub fn decode_bytes_to<B: ProtoBytes>(buf: &mut impl Buf) -> Result<B, DecodeError> {
+    read_field_payload(buf, B::from_wire)
 }
 
 /// Merge length-delimited bytes into an existing `Vec<u8>`, reusing its
@@ -881,6 +1166,58 @@ pub fn borrow_group<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A custom string representation that enforces an extra invariant in
+    /// `from_wire`, to prove a representation can surface `DecodeError::Custom`
+    /// through `decode_string_to`.
+    #[derive(Clone, PartialEq, Default, Debug)]
+    struct Tiny(alloc::string::String);
+    impl core::ops::Deref for Tiny {
+        type Target = str;
+        fn deref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl AsRef<str> for Tiny {
+        fn as_ref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl From<alloc::string::String> for Tiny {
+        fn from(s: alloc::string::String) -> Self {
+            Tiny(s)
+        }
+    }
+    impl From<&str> for Tiny {
+        fn from(s: &str) -> Self {
+            Tiny(s.into())
+        }
+    }
+    impl ProtoString for Tiny {
+        fn from_wire(p: WirePayload<'_>) -> Result<Self, DecodeError> {
+            let s = core::str::from_utf8(p.as_slice()).map_err(|_| DecodeError::InvalidUtf8)?;
+            if s.len() > 3 {
+                return Err(DecodeError::Custom("string too long"));
+            }
+            Ok(Tiny(s.into()))
+        }
+    }
+
+    #[test]
+    fn from_wire_can_surface_custom_decode_error() {
+        // Length-delimited "hello" (len 5) — rejected by Tiny's from_wire.
+        let mut buf: &[u8] = b"\x05hello";
+        assert_eq!(
+            decode_string_to::<Tiny>(&mut buf).unwrap_err(),
+            DecodeError::Custom("string too long"),
+        );
+        // A value within the limit decodes normally.
+        let mut ok: &[u8] = b"\x02hi";
+        assert_eq!(
+            decode_string_to::<Tiny>(&mut ok).unwrap(),
+            Tiny("hi".into())
+        );
+    }
 
     /// Each fused writer must emit exactly tag-then-payload.
     #[test]
@@ -1571,56 +1908,6 @@ mod tests {
             decode_string_to::<String>(&mut &short[..]),
             Err(DecodeError::UnexpectedEof)
         );
-    }
-
-    /// Every configurable string representation must decode identically to
-    /// `String` via the shared `decode_string_to` / `ProtoString` path. The
-    /// inputs straddle the small-string-optimization inline boundary so both
-    /// the inline and heap representations are exercised.
-    #[cfg(feature = "smol_str")]
-    #[test]
-    fn test_decode_string_to_smol_str() {
-        // Lengths straddle the inline caps of all three SSO types (ecow ~15,
-        // smol_str 23, compact_str 24 bytes on 64-bit) plus a clearly-heap case.
-        for n in [0usize, 13, 14, 15, 22, 23, 24, 25, 64] {
-            let owned = "a".repeat(n);
-            let s = owned.as_str();
-            let mut buf = Vec::new();
-            encode_string(s, &mut buf);
-            let decoded: smol_str::SmolStr = decode_string_to(&mut buf.as_slice()).unwrap();
-            assert_eq!(decoded.as_str(), s);
-        }
-    }
-
-    #[cfg(feature = "ecow")]
-    #[test]
-    fn test_decode_string_to_ecow() {
-        // Lengths straddle the inline caps of all three SSO types (ecow ~15,
-        // smol_str 23, compact_str 24 bytes on 64-bit) plus a clearly-heap case.
-        for n in [0usize, 13, 14, 15, 22, 23, 24, 25, 64] {
-            let owned = "a".repeat(n);
-            let s = owned.as_str();
-            let mut buf = Vec::new();
-            encode_string(s, &mut buf);
-            let decoded: ecow::EcoString = decode_string_to(&mut buf.as_slice()).unwrap();
-            assert_eq!(decoded.as_str(), s);
-        }
-    }
-
-    #[cfg(feature = "compact_str")]
-    #[test]
-    fn test_decode_string_to_compact_str() {
-        // Lengths straddle the inline caps of all three SSO types (ecow ~15,
-        // smol_str 23, compact_str 24 bytes on 64-bit) plus a clearly-heap case.
-        for n in [0usize, 13, 14, 15, 22, 23, 24, 25, 64] {
-            let owned = "a".repeat(n);
-            let s = owned.as_str();
-            let mut buf = Vec::new();
-            encode_string(s, &mut buf);
-            let decoded: compact_str::CompactString =
-                decode_string_to(&mut buf.as_slice()).unwrap();
-            assert_eq!(decoded.as_str(), s);
-        }
     }
 
     #[test]

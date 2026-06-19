@@ -16,15 +16,191 @@ pub mod debug_redact {
     buffa::include_proto!("debug_redact");
 }
 
-/// `string_type(SmolStr)` + vtable reflection — exercises `ReflectElement for
-/// SmolStr` on the repeated-string element path.
+/// `string_type` + vtable reflection with a crate-local newtype string used as
+/// a `repeated` element. Because the type is local, codegen may emit the
+/// `ReflectElement` and `ProtoElemJson` impls for it — the orphan rule forbids
+/// those for a foreign type used in a repeated field.
 #[allow(
     clippy::derivable_impls,
     clippy::match_single_binding,
     non_camel_case_types
 )]
 pub mod vtable_string_repr {
+    /// `String`-backed newtype satisfying `buffa::ProtoString` (`Deref<str>` +
+    /// `AsRef<str>` + `From<String>`/`From<&str>`). It derives `Serialize` /
+    /// `Deserialize` because a `repeated string` JSON field serializes its
+    /// elements through their native serde impls (singular fields use the
+    /// `proto_string` with-module instead, which needs only `AsRef`/`From`).
+    #[derive(Clone, PartialEq, Eq, Default, Debug, ::serde::Serialize, ::serde::Deserialize)]
+    pub struct LocalStr(pub ::buffa::alloc::string::String);
+
+    impl ::core::ops::Deref for LocalStr {
+        type Target = str;
+        fn deref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl ::core::convert::AsRef<str> for LocalStr {
+        fn as_ref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl ::core::convert::From<::buffa::alloc::string::String> for LocalStr {
+        fn from(s: ::buffa::alloc::string::String) -> Self {
+            LocalStr(s)
+        }
+    }
+    impl ::core::convert::From<&str> for LocalStr {
+        fn from(s: &str) -> Self {
+            LocalStr(::buffa::alloc::string::String::from(s))
+        }
+    }
+    impl ::buffa::ProtoString for LocalStr {
+        fn from_wire(
+            payload: ::buffa::WirePayload<'_>,
+        ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+            ::core::str::from_utf8(payload.as_slice())
+                .map(|s| LocalStr(::buffa::alloc::string::String::from(s)))
+                .map_err(|_| ::buffa::DecodeError::InvalidUtf8)
+        }
+    }
+
     buffa::include_proto!("vtable_string_repr");
+}
+
+/// `bytes_type` + vtable reflection with a crate-local newtype used as a
+/// `repeated` element. Mirrors `vtable_string_repr` for the bytes side: the
+/// codegen-emitted `ReflectElement` and `ProtoElemJson` (base64) impls for
+/// `LocalBytes` compile only because the type is local to this crate.
+#[allow(
+    clippy::derivable_impls,
+    clippy::match_single_binding,
+    non_camel_case_types
+)]
+pub mod vtable_bytes_repr {
+    /// `Vec<u8>`-backed newtype satisfying `buffa::ProtoBytes` (`Deref<[u8]>` +
+    /// `AsRef<[u8]>` + `From<Vec<u8>>`). It needs no `serde` impl: singular bytes
+    /// use the `bytes` JSON with-module and repeated bytes use the emitted
+    /// `ProtoElemJson` base64 impl.
+    #[derive(Clone, PartialEq, Eq, Default, Debug)]
+    pub struct LocalBytes(pub ::buffa::alloc::vec::Vec<u8>);
+
+    impl ::core::ops::Deref for LocalBytes {
+        type Target = [u8];
+        fn deref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl ::core::convert::AsRef<[u8]> for LocalBytes {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl ::core::convert::From<::buffa::alloc::vec::Vec<u8>> for LocalBytes {
+        fn from(v: ::buffa::alloc::vec::Vec<u8>) -> Self {
+            LocalBytes(v)
+        }
+    }
+    impl ::buffa::ProtoBytes for LocalBytes {
+        fn from_wire(
+            payload: ::buffa::WirePayload<'_>,
+        ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+            ::core::result::Result::Ok(LocalBytes(payload.as_slice().to_vec()))
+        }
+    }
+
+    buffa::include_proto!("vtable_bytes_repr");
+}
+
+/// Crate-local `ProtoString` newtypes wrapping foreign small-string types, used
+/// by the `string_types` fixture. They mirror `buffa_smolstr::SmolStr`: a thin
+/// newtype with an inline, allocation-free `from_wire`. Direct use of the
+/// foreign types is no longer possible (the blanket impl is gone), so a
+/// downstream crate wraps them like this. None of them needs a native
+/// `Arbitrary` impl — codegen's generic `arbitrary_proto_*` builder handles it.
+pub mod reprs {
+    /// Newtype over `ecow::EcoString`. `ecow` ships no native `Arbitrary`, so
+    /// this fixture also exercises the generic arbitrary builder path.
+    #[derive(Clone, PartialEq, Eq, Default, Debug)]
+    pub struct EcoStr(pub ::ecow::EcoString);
+
+    impl EcoStr {
+        pub fn as_str(&self) -> &str {
+            self.0.as_str()
+        }
+    }
+
+    impl ::core::ops::Deref for EcoStr {
+        type Target = str;
+        fn deref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl ::core::convert::AsRef<str> for EcoStr {
+        fn as_ref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl ::core::convert::From<::buffa::alloc::string::String> for EcoStr {
+        fn from(s: ::buffa::alloc::string::String) -> Self {
+            EcoStr(::ecow::EcoString::from(s))
+        }
+    }
+    impl ::core::convert::From<&str> for EcoStr {
+        fn from(s: &str) -> Self {
+            EcoStr(::ecow::EcoString::from(s))
+        }
+    }
+    impl ::buffa::ProtoString for EcoStr {
+        fn from_wire(
+            payload: ::buffa::WirePayload<'_>,
+        ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+            ::core::str::from_utf8(payload.as_slice())
+                .map(|s| EcoStr(::ecow::EcoString::from(s)))
+                .map_err(|_| ::buffa::DecodeError::InvalidUtf8)
+        }
+    }
+
+    /// Newtype over `compact_str::CompactString`.
+    #[derive(Clone, PartialEq, Eq, Default, Debug)]
+    pub struct CompactStr(pub ::compact_str::CompactString);
+
+    impl CompactStr {
+        pub fn as_str(&self) -> &str {
+            self.0.as_str()
+        }
+    }
+
+    impl ::core::ops::Deref for CompactStr {
+        type Target = str;
+        fn deref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl ::core::convert::AsRef<str> for CompactStr {
+        fn as_ref(&self) -> &str {
+            &self.0
+        }
+    }
+    impl ::core::convert::From<::buffa::alloc::string::String> for CompactStr {
+        fn from(s: ::buffa::alloc::string::String) -> Self {
+            CompactStr(::compact_str::CompactString::from(s))
+        }
+    }
+    impl ::core::convert::From<&str> for CompactStr {
+        fn from(s: &str) -> Self {
+            CompactStr(::compact_str::CompactString::from(s))
+        }
+    }
+    impl ::buffa::ProtoString for CompactStr {
+        fn from_wire(
+            payload: ::buffa::WirePayload<'_>,
+        ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+            ::core::str::from_utf8(payload.as_slice())
+                .map(|s| CompactStr(::compact_str::CompactString::from(s)))
+                .map_err(|_| ::buffa::DecodeError::InvalidUtf8)
+        }
+    }
 }
 
 /// `generate_views(false)` + vtable reflection — owned-only vtable, no views.

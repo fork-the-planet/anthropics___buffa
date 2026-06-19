@@ -20,16 +20,33 @@ fn main() {
         .compile()
         .expect("buffa_build failed for vtable_no_views.proto");
 
-    // string_type(SmolStr) + vtable: exercises `ReflectElement for SmolStr` on
-    // the repeated-string element path (`Vec<SmolStr>`). Singular string fields
-    // reflect via deref; map string keys/values stay `String`.
+    // string_type + vtable: a crate-LOCAL newtype string used in a repeated
+    // field exercises the codegen-emitted `ReflectElement` (and, with json,
+    // `ProtoElemJson`) impl for the element path (`Vec<LocalStr>`). A foreign
+    // type here would be an orphan-rule error — only local types are reflectable
+    // in a repeated field. Singular string fields reflect via deref; map string
+    // keys/values stay `String`.
     buffa_build::Config::new()
         .files(&["protos/vtable_string_repr.proto"])
         .includes(&["protos/"])
-        .string_type(buffa_build::StringRepr::SmolStr)
+        .string_type_custom("crate::vtable_string_repr::LocalStr")
+        .generate_json(true)
         .reflect_mode(buffa_build::ReflectMode::VTable)
         .compile()
         .expect("buffa_build failed for vtable_string_repr.proto");
+
+    // bytes_type + vtable: the bytes-side mirror of vtable_string_repr. A
+    // crate-LOCAL `LocalBytes` newtype in a repeated field exercises the
+    // codegen-emitted `ReflectElement` and the base64 `ProtoElemJson` impl.
+    buffa_build::Config::new()
+        .files(&["protos/vtable_bytes_repr.proto"])
+        .includes(&["protos/"])
+        .bytes_type_custom("crate::vtable_bytes_repr::LocalBytes")
+        .generate_json(true)
+        .generate_text(true)
+        .reflect_mode(buffa_build::ReflectMode::VTable)
+        .compile()
+        .expect("buffa_build failed for vtable_bytes_repr.proto");
 
     // Comprehensive proto3 semantics: implicit vs explicit presence for all
     // scalar types, open-enum contexts, default packing, synthetic oneofs.
@@ -316,25 +333,34 @@ fn main() {
         .compile()
         .expect("buffa_build failed for utf8_validation.proto with strict_utf8_mapping + use_bytes_type");
 
-    // Configurable string_type: a broad SmolStr default plus per-field
-    // CompactString / EcoString overrides, with generate_json + arbitrary so
-    // every string code path (decode/clear/view/json/arbitrary, including the
-    // EcoString arbitrary shim) is compiled. Map keys/values stay String.
+    // Configurable string_type with custom ProtoString types: the buffa-smolstr
+    // preset crate for the SmolStr fields, plus crate-local newtypes for the
+    // ecow/compact_str cases (the foreign types no longer implement ProtoString
+    // directly — they must be wrapped). generate_json + arbitrary so every
+    // string code path (decode/clear/view/json/arbitrary) is compiled; EcoStr
+    // wraps a type with no native Arbitrary, exercising the generic builder.
+    // The repeated `many` field stays `String` — a custom repeated element must
+    // be crate-local (covered by `LocalStr` in `vtable_string_repr`). Map
+    // keys/values stay String.
     let string_out =
         std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("string_variant");
     std::fs::create_dir_all(&string_out).expect("create string_variant dir");
     buffa_build::Config::new()
         .files(&["protos/string_types.proto"])
         .includes(&["protos/"])
-        .string_type(buffa_build::StringRepr::SmolStr)
-        .string_type_in(
-            buffa_build::StringRepr::CompactString,
+        .string_type_custom_in(
+            "::buffa_smolstr::SmolStr",
+            &[
+                ".stringtypes.StringContexts.singular",
+                ".stringtypes.StringContexts.maybe",
+                ".stringtypes.StringContexts.named",
+            ],
+        )
+        .string_type_custom_in(
+            "crate::reprs::CompactStr",
             &[".stringtypes.StringContexts.compact"],
         )
-        .string_type_in(
-            buffa_build::StringRepr::EcoString,
-            &[".stringtypes.StringContexts.eco"],
-        )
+        .string_type_custom_in("crate::reprs::EcoStr", &[".stringtypes.StringContexts.eco"])
         .generate_json(true)
         .generate_arbitrary(true)
         .generate_text(true)
@@ -351,7 +377,7 @@ fn main() {
     buffa_build::Config::new()
         .files(&["protos/string_proto2.proto"])
         .includes(&["protos/"])
-        .string_type(buffa_build::StringRepr::SmolStr)
+        .string_type_custom("::buffa_smolstr::SmolStr")
         .out_dir(string_p2_out)
         .compile()
         .expect("buffa_build failed for string_proto2.proto with string_type");
