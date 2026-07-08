@@ -21,7 +21,7 @@ use buffa_codegen::generated::compiler::code_generator_response::File as CodeGen
 use buffa_codegen::generated::compiler::{CodeGeneratorRequest, CodeGeneratorResponse};
 use buffa_codegen::generated::descriptor::{Edition, FileDescriptorProto};
 
-use buffa_codegen::CodeGenConfig;
+use buffa_codegen::{CodeGenConfig, EnumTypeOverride, FeatureOverride};
 
 const HELP: &str = "\
 protoc-gen-buffa — protoc plugin for generating Rust code with buffa.
@@ -326,6 +326,29 @@ fn parse_config(params: &str) -> Result<PluginConfig, String> {
             // is not PascalCase at generation time (same rule as the
             // builder API).
             "type_name_prefix" => codegen.type_name_prefix = value.to_string(),
+            // Repeatable path-scoped editions feature override; value is
+            // "<path>=<feature>:<value>" (e.g. ".my.pkg.E=enum_type:OPEN").
+            // Applied by buffa-codegen as descriptor feature injection.
+            "override_feature_in" => {
+                let (path, feature_spec) = value.split_once('=').ok_or_else(|| {
+                    format!(
+                        "invalid override_feature_in format '{value}', expected \
+                         'override_feature_in=<proto_path>=<feature>:<value>' \
+                         (e.g. 'override_feature_in=.my.pkg.E=enum_type:OPEN')"
+                    )
+                })?;
+                let feature = parse_feature_override(feature_spec.trim())?;
+                codegen
+                    .feature_overrides
+                    .push((normalize_override_path(path.trim())?, feature));
+            }
+            // Shorthand for "override_feature_in=<path>=enum_type:OPEN".
+            "open_enums_in" => {
+                codegen.feature_overrides.push((
+                    normalize_override_path(value.trim())?,
+                    FeatureOverride::EnumType(EnumTypeOverride::Open),
+                ));
+            }
             // `exclude_package=.buf.validate` drops a proto package (and its
             // subpackages) from generation. Repeatable. Intended for
             // option-only imports that `include_imports` pulls into
@@ -393,6 +416,58 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
             "invalid boolean value for '{key}': '{other}', expected true or false"
         )),
     }
+}
+
+/// Parse the `<feature>:<value>` half of an `override_feature_in` option.
+/// The supported set is the [`FeatureOverride`] allowlist; anything else is
+/// a hard error naming what is supported.
+fn parse_feature_override(spec: &str) -> Result<FeatureOverride, String> {
+    let (feature, value) = spec.split_once(':').ok_or_else(|| {
+        format!(
+            "invalid feature override '{spec}', expected '<feature>:<value>' \
+             (e.g. 'enum_type:OPEN')"
+        )
+    })?;
+    // Feature names are matched exactly (they are FeatureSet field
+    // identifiers); values case-insensitively (they are enum value names,
+    // conventionally SHOUTY but commonly typed lowercase).
+    match feature.trim() {
+        "enum_type" if value.trim().eq_ignore_ascii_case("open") => {
+            Ok(FeatureOverride::EnumType(EnumTypeOverride::Open))
+        }
+        _ => Err(format!(
+            "unsupported feature override '{spec}'; supported overrides: enum_type:OPEN"
+        )),
+    }
+}
+
+fn normalize_override_path(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err(
+            "feature override rules require a non-empty proto path; use '.' explicitly to match everything"
+                .to_string(),
+        );
+    }
+
+    if path == "." {
+        return Ok(".".to_string());
+    }
+
+    let mut path = path.to_string();
+    if !path.starts_with('.') {
+        path.insert(0, '.');
+    }
+    while path.ends_with('.') {
+        path.pop();
+    }
+
+    if path.is_empty() {
+        return Err(
+            "feature override rules require a non-empty proto path; use '.' explicitly to match everything"
+                .to_string(),
+        );
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -520,6 +595,79 @@ mod tests {
         assert_eq!(config.codegen.extern_paths.len(), 2);
         assert_eq!(config.codegen.extern_paths[0].0, ".my.a");
         assert_eq!(config.codegen.extern_paths[1].0, ".my.b");
+    }
+
+    #[test]
+    fn open_enums_in_is_repeatable_and_normalized() {
+        let config =
+            parse_config("open_enums_in=my.pkg.Status.,open_enums_in=.my.pkg.Msg.e").unwrap();
+        assert_eq!(
+            config.codegen.feature_overrides,
+            vec![
+                (
+                    ".my.pkg.Status".to_string(),
+                    FeatureOverride::EnumType(EnumTypeOverride::Open)
+                ),
+                (
+                    ".my.pkg.Msg.e".to_string(),
+                    FeatureOverride::EnumType(EnumTypeOverride::Open)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn override_feature_in_parses_path_feature_and_value() {
+        let config = parse_config("override_feature_in=my.pkg.Status.=enum_type:OPEN").unwrap();
+        assert_eq!(
+            config.codegen.feature_overrides,
+            vec![(
+                ".my.pkg.Status".to_string(),
+                FeatureOverride::EnumType(EnumTypeOverride::Open)
+            )]
+        );
+    }
+
+    #[test]
+    fn override_feature_in_rejects_unsupported_features() {
+        let err = parse_err("override_feature_in=.my.pkg.Msg.f=message_encoding:DELIMITED");
+        assert!(err.contains("unsupported feature override"));
+        assert!(err.contains("enum_type:OPEN"));
+
+        let err = parse_err("override_feature_in=.my.pkg.E=enum_type:CLOSED");
+        assert!(err.contains("unsupported feature override"));
+    }
+
+    #[test]
+    fn override_feature_in_missing_value_errors() {
+        let err = parse_err("override_feature_in=.my.pkg.E");
+        assert!(err.contains("override_feature_in"));
+        assert!(err.contains("<feature>:<value>") || err.contains("expected"));
+    }
+
+    #[test]
+    fn open_enums_in_catchall() {
+        let config = parse_config("open_enums_in=.").unwrap();
+        assert_eq!(
+            config.codegen.feature_overrides,
+            vec![(
+                ".".to_string(),
+                FeatureOverride::EnumType(EnumTypeOverride::Open)
+            )]
+        );
+    }
+
+    #[test]
+    fn empty_open_enums_in_errors() {
+        let err = parse_err("open_enums_in=");
+        assert!(err.contains("non-empty"));
+        assert!(err.contains("'.'"));
+    }
+
+    #[test]
+    fn all_dots_open_enums_in_errors() {
+        let err = parse_err("open_enums_in=...");
+        assert!(err.contains("non-empty"));
     }
 
     #[test]

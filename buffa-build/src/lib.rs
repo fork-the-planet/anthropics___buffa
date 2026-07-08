@@ -41,6 +41,8 @@ pub use buffa_codegen::FeatureGateNames;
 pub use buffa_codegen::ReflectMode;
 #[doc(inline)]
 pub use buffa_codegen::{BytesRepr, MapRepr, PointerRepr, RepeatedRepr, StringRepr};
+#[doc(inline)]
+pub use buffa_codegen::{EnumTypeOverride, FeatureOverride};
 
 /// How to produce a `FileDescriptorSet` from `.proto` files.
 #[derive(Debug, Clone, Default)]
@@ -619,6 +621,87 @@ impl Config {
     #[must_use]
     pub fn preserve_unknown_fields(mut self, enabled: bool) -> Self {
         self.codegen_config.preserve_unknown_fields = enabled;
+        self
+    }
+
+    /// Apply a path-scoped editions [`FeatureOverride`] to the compiled
+    /// descriptors before generation.
+    ///
+    /// This is buffa's mechanism for integrators who must work with protos
+    /// they cannot modify: editions unification models proto2 and proto3 as
+    /// editions with fixed feature defaults, and an override behaves as if
+    /// the proto had been migrated to editions with that feature set at the
+    /// matched paths. The supported overrides are the [`FeatureOverride`]
+    /// variants — each is admitted only once buffa's codegen, runtime, and
+    /// validation handle the descriptor states it can create. Overrides
+    /// never change the wire format.
+    ///
+    /// `path` is a fully-qualified proto path prefix. A rule may name a type
+    /// (for example, `".my.pkg.Status"`), a field
+    /// (`".my.pkg.Response.status"`), a package/message prefix, or `"."` for
+    /// everything the override targets. A leading dot is added if missing.
+    /// Map enum values match the outer map field path; oneof enum variants
+    /// match the direct field path. An empty path is warned about and
+    /// ignored so `"."` remains the only global opt-in spelling. (The
+    /// `protoc-gen-buffa` plugin's `override_feature_in=` option rejects
+    /// empty paths with a hard error instead: a stray build-script entry
+    /// shouldn't fail the build, but plugin options are usually
+    /// machine-assembled, where an empty value is a bug.)
+    ///
+    /// Repeated calls accumulate; rule order does not matter. A rule that
+    /// matches nothing produces a `cargo:warning` from this build (surfaced
+    /// via [`CodeGenWarning`](buffa_codegen::CodeGenWarning)), since an
+    /// inert rule silently leaves the affected paths on the semantics the
+    /// override exists to change.
+    ///
+    /// Under reflection, the embedded descriptor pool carries the injected
+    /// features, so spec-valid injections (e.g. an enum-*type*
+    /// [`FeatureOverride::EnumType`] rule) keep runtime reflection and
+    /// descriptor-driven dynamic JSON consistent with the generated types;
+    /// see each variant's docs for its field-scoped semantics.
+    #[must_use]
+    pub fn override_feature_in(mut self, path: impl AsRef<str>, feature: FeatureOverride) -> Self {
+        let raw = path.as_ref();
+        let normalized = normalize_override_path(raw);
+        if normalized.is_empty() {
+            // Neutral wording: this also fires for the `open_enums_in` sugar,
+            // so the message must not name a method the caller didn't invoke.
+            println!(
+                "cargo:warning=buffa: feature override path '{raw}' normalizes to empty and will be ignored"
+            );
+            return self;
+        }
+        self.codegen_config
+            .feature_overrides
+            .push((normalized, feature));
+        self
+    }
+
+    /// Treat selected closed enums (or closed enum fields) as open in the
+    /// generated representation — shorthand for
+    /// [`override_feature_in(path, FeatureOverride::EnumType(EnumTypeOverride::Open))`](Self::override_feature_in)
+    /// applied to each path.
+    ///
+    /// Matching closed enum fields generate as `EnumValue<E>` instead of `E`,
+    /// so unknown wire values are directly visible as `EnumValue::Unknown(n)`.
+    /// This is an opt-in migration / interop mode: it deliberately changes
+    /// closed-enum presence behavior for matching fields, making an unknown
+    /// value read as present instead of unset with the raw value represented
+    /// through unknown fields. An enum-type rule opens the enum itself (every
+    /// field referencing it, and the embedded reflection pool agrees); a
+    /// field rule opens just that field (descriptor-driven codecs keep
+    /// closed-enum semantics for the enum) — prefer enum-type rules when
+    /// reflective codecs must agree. Path grammar, accumulation, and
+    /// inert-rule warnings are as described on
+    /// [`override_feature_in`](Self::override_feature_in).
+    #[must_use]
+    pub fn open_enums_in(mut self, paths: &[impl AsRef<str>]) -> Self {
+        for path in paths {
+            self = self.override_feature_in(
+                path.as_ref(),
+                FeatureOverride::EnumType(EnumTypeOverride::Open),
+            );
+        }
         self
     }
 
@@ -1707,6 +1790,25 @@ fn normalize_attr_path(mut path: String) -> String {
     path
 }
 
+/// Normalize an `override_feature_in` path: trim whitespace, prepend the
+/// leading dot if absent, and strip trailing dots. Unlike
+/// [`normalize_attr_path`], an entry that normalizes to empty (e.g. `"..."`)
+/// is returned empty rather than collapsing to the `"."` catch-all — the
+/// caller skips it, so `"."` stays the only global opt-in spelling.
+fn normalize_override_path(path: &str) -> String {
+    let mut path = path.trim().to_string();
+    if path.is_empty() || path == "." {
+        return path;
+    }
+    if !path.starts_with('.') {
+        path.insert(0, '.');
+    }
+    while path.ends_with('.') {
+        path.pop();
+    }
+    path
+}
+
 /// Write `content` to `path` only if the file doesn't already exist with
 /// identical content. Avoids bumping timestamps on unchanged files, which
 /// prevents unnecessary downstream recompilation.
@@ -1973,6 +2075,74 @@ mod tests {
                 ".my.pkg.Other".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn open_enums_in_normalizes_paths() {
+        // Without normalization, dotless or trailing-dot paths would silently
+        // match nothing.
+        let config = Config::new()
+            .open_enums_in(&[
+                "my.pkg.Status.",
+                ".my.pkg.Msg.status",
+                ".",
+                "  my.pkg.Trimmed  ",
+            ])
+            .codegen_config;
+        let paths: Vec<&str> = config
+            .feature_overrides
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                ".my.pkg.Status",
+                ".my.pkg.Msg.status",
+                ".",
+                ".my.pkg.Trimmed"
+            ]
+        );
+        assert!(config
+            .feature_overrides
+            .iter()
+            .all(|(_, o)| *o == FeatureOverride::EnumType(EnumTypeOverride::Open)));
+    }
+
+    #[test]
+    fn override_feature_in_accumulates_and_normalizes() {
+        let config = Config::new()
+            .override_feature_in(
+                "my.pkg.Status.",
+                FeatureOverride::EnumType(EnumTypeOverride::Open),
+            )
+            .override_feature_in(
+                ".my.pkg.Msg.e",
+                FeatureOverride::EnumType(EnumTypeOverride::Open),
+            )
+            .override_feature_in("...", FeatureOverride::EnumType(EnumTypeOverride::Open))
+            .codegen_config;
+        assert_eq!(
+            config.feature_overrides,
+            vec![
+                (
+                    ".my.pkg.Status".to_string(),
+                    FeatureOverride::EnumType(EnumTypeOverride::Open)
+                ),
+                (
+                    ".my.pkg.Msg.e".to_string(),
+                    FeatureOverride::EnumType(EnumTypeOverride::Open)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn open_enums_in_empty_path_is_not_catchall() {
+        let config = Config::new()
+            .open_enums_in(&["", "   ", "..."])
+            .codegen_config;
+        assert!(config.feature_overrides.is_empty());
     }
 
     #[test]
