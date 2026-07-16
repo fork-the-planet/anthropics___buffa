@@ -307,22 +307,31 @@ impl DynamicMessage {
         }
         match kind {
             FieldKind::Singular(sk) => {
+                // Singular message merge semantics: when the same field appears
+                // multiple times on the wire, the parser merges the messages
+                // (each sub-field merged) rather than replacing wholesale.
+                if let SingularKind::Message(midx) = sk {
+                    if let Some(Value::Message(_)) = self.fields.get(&number) {
+                        // This member already holds the oneof, so no sibling is
+                        // set and the clear below has nothing to do. Merging in
+                        // place keeps a partially merged value on error, which
+                        // is what the owned decoder leaves behind.
+                        if let Some(oi) = oneof_index {
+                            self.clear_other_oneof_members(oi, number);
+                        }
+                        // Decode the new bytes into the existing message.
+                        return self.merge_into_existing_message(number, midx, tag, buf, ctx);
+                    }
+                }
+                // Decode before clearing: a replacement that fails to decode
+                // must leave the oneof member that is currently set intact.
+                let v = self.decode_element(sk, tag, buf, ctx)?;
                 // Oneof semantics: setting any member clears all other members
                 // of the same oneof. Synthetic oneofs (proto3 `optional`) have
                 // a single member so this is a no-op for them.
                 if let Some(oi) = oneof_index {
                     self.clear_other_oneof_members(oi, number);
                 }
-                // Singular message merge semantics: when the same field appears
-                // multiple times on the wire, the parser merges the messages
-                // (each sub-field merged) rather than replacing wholesale.
-                if let SingularKind::Message(midx) = sk {
-                    if let Some(Value::Message(_)) = self.fields.get(&number) {
-                        // Decode the new bytes into the existing message.
-                        return self.merge_into_existing_message(number, midx, tag, buf, ctx);
-                    }
-                }
-                let v = self.decode_element(sk, tag, buf, ctx)?;
                 self.fields.insert(number, v);
             }
             FieldKind::List(sk) => {
