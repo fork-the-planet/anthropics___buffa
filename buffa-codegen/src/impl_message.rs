@@ -2386,6 +2386,7 @@ fn repeated_merge_arm(
                 #list_use
                 #wire_check
                 let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(::buffa::__private::element_footprint(&elem))?;
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
                 self.#ident.push(elem);
             }
@@ -2401,6 +2402,7 @@ fn repeated_merge_arm(
                 #list_use
                 #wire_check
                 let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(::buffa::__private::element_footprint(&elem))?;
                 ::buffa::Message::merge_group(&mut elem, buf, ctx, #field_number)?;
                 self.#ident.push(elem);
             }
@@ -2444,7 +2446,9 @@ fn repeated_merge_arm(
             #field_number => {
                 #list_use
                 #wire_check
-                self.#ident.push(#decode_expr);
+                let __elem = #decode_expr;
+                ctx.register_element_memory(::buffa::__private::element_footprint(&__elem))?;
+                self.#ident.push(__elem);
             }
         });
     }

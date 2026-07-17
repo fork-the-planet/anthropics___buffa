@@ -47,6 +47,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorSetView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::FileDescriptorProtoView,
+                    >(),
+                )?;
                 view.file
                     .push(
                         <super::super::__buffa::view::FileDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -477,7 +482,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorProtoView<'a> {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                view.dependency.push(::buffa::types::borrow_str(&mut cur)?);
+                let __elem = ::buffa::types::borrow_str(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.dependency.push(__elem);
             }
             10u32 => {
                 if tag.wire_type() == ::buffa::encoding::WireType::LengthDelimited {
@@ -522,7 +531,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorProtoView<'a> {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                view.option_dependency.push(::buffa::types::borrow_str(&mut cur)?);
+                let __elem = ::buffa::types::borrow_str(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.option_dependency.push(__elem);
             }
             4u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -531,6 +544,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::DescriptorProtoView,
+                    >(),
+                )?;
                 view.message_type
                     .push(
                         <super::super::__buffa::view::DescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -546,6 +564,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::EnumDescriptorProtoView,
+                    >(),
+                )?;
                 view.enum_type
                     .push(
                         <super::super::__buffa::view::EnumDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -561,6 +584,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::ServiceDescriptorProtoView,
+                    >(),
+                )?;
                 view.service
                     .push(
                         <super::super::__buffa::view::ServiceDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -576,6 +604,11 @@ impl<'a> ::buffa::MessageView<'a> for FileDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::FieldDescriptorProtoView,
+                    >(),
+                )?;
                 view.extension
                     .push(
                         <super::super::__buffa::view::FieldDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -1297,6 +1330,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::FieldDescriptorProtoView,
+                    >(),
+                )?;
                 view.field
                     .push(
                         <super::super::__buffa::view::FieldDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -1312,6 +1350,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::FieldDescriptorProtoView,
+                    >(),
+                )?;
                 view.extension
                     .push(
                         <super::super::__buffa::view::FieldDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -1327,6 +1370,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::DescriptorProtoView,
+                    >(),
+                )?;
                 view.nested_type
                     .push(
                         <super::super::__buffa::view::DescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -1342,6 +1390,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::EnumDescriptorProtoView,
+                    >(),
+                )?;
                 view.enum_type
                     .push(
                         <super::super::__buffa::view::EnumDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -1357,6 +1410,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::descriptor_proto::ExtensionRangeView,
+                    >(),
+                )?;
                 view.extension_range
                     .push(
                         <super::super::__buffa::view::descriptor_proto::ExtensionRangeView as ::buffa::MessageView>::decode_view_ctx(
@@ -1372,6 +1430,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::OneofDescriptorProtoView,
+                    >(),
+                )?;
                 view.oneof_decl
                     .push(
                         <super::super::__buffa::view::OneofDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -1387,6 +1450,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::descriptor_proto::ReservedRangeView,
+                    >(),
+                )?;
                 view.reserved_range
                     .push(
                         <super::super::__buffa::view::descriptor_proto::ReservedRangeView as ::buffa::MessageView>::decode_view_ctx(
@@ -1400,7 +1468,11 @@ impl<'a> ::buffa::MessageView<'a> for DescriptorProtoView<'a> {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                view.reserved_name.push(::buffa::types::borrow_str(&mut cur)?);
+                let __elem = ::buffa::types::borrow_str(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.reserved_name.push(__elem);
             }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
@@ -2685,6 +2757,11 @@ impl<'a> ::buffa::MessageView<'a> for ExtensionRangeOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -2700,6 +2777,11 @@ impl<'a> ::buffa::MessageView<'a> for ExtensionRangeOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::extension_range_options::DeclarationView,
+                    >(),
+                )?;
                 view.declaration
                     .push(
                         <super::super::__buffa::view::extension_range_options::DeclarationView as ::buffa::MessageView>::decode_view_ctx(
@@ -4521,6 +4603,11 @@ impl<'a> ::buffa::MessageView<'a> for EnumDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::EnumValueDescriptorProtoView,
+                    >(),
+                )?;
                 view.value
                     .push(
                         <super::super::__buffa::view::EnumValueDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -4536,6 +4623,11 @@ impl<'a> ::buffa::MessageView<'a> for EnumDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::enum_descriptor_proto::EnumReservedRangeView,
+                    >(),
+                )?;
                 view.reserved_range
                     .push(
                         <super::super::__buffa::view::enum_descriptor_proto::EnumReservedRangeView as ::buffa::MessageView>::decode_view_ctx(
@@ -4549,7 +4641,11 @@ impl<'a> ::buffa::MessageView<'a> for EnumDescriptorProtoView<'a> {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                view.reserved_name.push(::buffa::types::borrow_str(&mut cur)?);
+                let __elem = ::buffa::types::borrow_str(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.reserved_name.push(__elem);
             }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
@@ -5638,6 +5734,11 @@ impl<'a> ::buffa::MessageView<'a> for ServiceDescriptorProtoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::MethodDescriptorProtoView,
+                    >(),
+                )?;
                 view.method
                     .push(
                         <super::super::__buffa::view::MethodDescriptorProtoView as ::buffa::MessageView>::decode_view_ctx(
@@ -6738,6 +6839,11 @@ impl<'a> ::buffa::MessageView<'a> for FileOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -7580,6 +7686,11 @@ impl<'a> ::buffa::MessageView<'a> for MessageOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -8325,6 +8436,11 @@ impl<'a> ::buffa::MessageView<'a> for FieldOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::field_options::EditionDefaultView,
+                    >(),
+                )?;
                 view.edition_defaults
                     .push(
                         <super::super::__buffa::view::field_options::EditionDefaultView as ::buffa::MessageView>::decode_view_ctx(
@@ -8340,6 +8456,11 @@ impl<'a> ::buffa::MessageView<'a> for FieldOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -9704,6 +9825,11 @@ impl<'a> ::buffa::MessageView<'a> for OneofOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -10099,6 +10225,11 @@ impl<'a> ::buffa::MessageView<'a> for EnumOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -10569,6 +10700,11 @@ impl<'a> ::buffa::MessageView<'a> for EnumValueOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -11021,6 +11157,11 @@ impl<'a> ::buffa::MessageView<'a> for ServiceOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -11438,6 +11579,11 @@ impl<'a> ::buffa::MessageView<'a> for MethodOptionsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::UninterpretedOptionView,
+                    >(),
+                )?;
                 view.uninterpreted_option
                     .push(
                         <super::super::__buffa::view::UninterpretedOptionView as ::buffa::MessageView>::decode_view_ctx(
@@ -11866,6 +12012,11 @@ impl<'a> ::buffa::MessageView<'a> for UninterpretedOptionView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::uninterpreted_option::NamePartView,
+                    >(),
+                )?;
                 view.name
                     .push(
                         <super::super::__buffa::view::uninterpreted_option::NamePartView as ::buffa::MessageView>::decode_view_ctx(
@@ -13402,6 +13553,11 @@ impl<'a> ::buffa::MessageView<'a> for FeatureSetDefaultsView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::feature_set_defaults::FeatureSetEditionDefaultView,
+                    >(),
+                )?;
                 view.defaults
                     .push(
                         <super::super::__buffa::view::feature_set_defaults::FeatureSetEditionDefaultView as ::buffa::MessageView>::decode_view_ctx(
@@ -14212,6 +14368,11 @@ impl<'a> ::buffa::MessageView<'a> for SourceCodeInfoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::source_code_info::LocationView,
+                    >(),
+                )?;
                 view.location
                     .push(
                         <super::super::__buffa::view::source_code_info::LocationView as ::buffa::MessageView>::decode_view_ctx(
@@ -14679,8 +14840,11 @@ pub mod source_code_info {
                         tag,
                         ::buffa::encoding::WireType::LengthDelimited,
                     )?;
-                    view.leading_detached_comments
-                        .push(::buffa::types::borrow_str(&mut cur)?);
+                    let __elem = ::buffa::types::borrow_str(&mut cur)?;
+                    ctx.register_element_memory(
+                        ::buffa::__private::element_footprint(&__elem),
+                    )?;
+                    view.leading_detached_comments.push(__elem);
                 }
                 _ => {
                     ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
@@ -15131,6 +15295,11 @@ impl<'a> ::buffa::MessageView<'a> for GeneratedCodeInfoView<'a> {
                 )?;
                 let __sub_ctx = ctx.descend()?;
                 let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::core::mem::size_of::<
+                        super::super::__buffa::view::generated_code_info::AnnotationView,
+                    >(),
+                )?;
                 view.annotation
                     .push(
                         <super::super::__buffa::view::generated_code_info::AnnotationView as ::buffa::MessageView>::decode_view_ctx(
